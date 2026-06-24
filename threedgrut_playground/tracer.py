@@ -187,6 +187,7 @@ class Tracer:
         envmap=None,
         envmap_offset=None,
         max_pbr_bounces=7,
+        lights=None,
     ):
         if ray_max_t is None:
             ray_max_t = ray_o.new_full(size=ray_o.shape[0:3], fill_value=1e9)
@@ -204,6 +205,8 @@ class Tracer:
             envmap = torch.zeros([4, 4, 4], dtype=torch.float32)
         if envmap_offset is None:
             envmap = torch.zeros([2], dtype=torch.float32)
+        if lights is None:
+            lights = torch.empty([0, 9], dtype=torch.float32)
 
         poses = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]], dtype=torch.float32)
 
@@ -248,6 +251,7 @@ class Tracer:
                 envmap,
                 envmap_offset,
                 max_pbr_bounces,
+                lights,
             )
 
             pred_dist = pred_dist[:, :, :, 0:1]  # return only the hit distance

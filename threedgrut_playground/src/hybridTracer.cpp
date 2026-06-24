@@ -309,6 +309,28 @@ void HybridOptixTracer::syncMaterials(
   }
 }
 
+void HybridOptixTracer::syncLights(const torch::Tensor &lights) {
+  // lights: [N, 9] float32 (contract C8). Parse row-by-row into host cache.
+  const torch::Tensor lightsCpu = lights.to(torch::kCPU).contiguous();
+  const int64_t numLights = lightsCpu.size(0); // N == 0 -> [0, 9] empty tensor
+  _playgroundState->lights.resize(numLights);
+  if (numLights == 0)
+    return;
+
+  const float *p = lightsCpu.data_ptr<float>();
+  constexpr int STRIDE = 9; // column order: see contract C8
+  for (int64_t i = 0; i < numLights; ++i) {
+    const float *row = p + i * STRIDE;
+    PlaygroundLight &L = _playgroundState->lights[i];
+    L.type = static_cast<unsigned int>(row[0]); // 0=None, 1=Directional
+    L.direction = make_float3(row[1], row[2], row[3]);
+    L.color = make_float3(row[4], row[5], row[6]);
+    L.intensity = row[7];
+    L.angularRadius = row[8];
+    // direction normalization / orientation is guaranteed Python-side (C2/R6).
+  }
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor>
 HybridOptixTracer::traceHybrid(
@@ -320,7 +342,8 @@ HybridOptixTracer::traceHybrid(
     torch::Tensor primType, torch::Tensor matUV, torch::Tensor matID,
     const std::vector<CPBRMaterial> &materials, bool shouldSyncMaterials,
     torch::Tensor refractiveIndex, torch::Tensor envmap,
-    torch::Tensor envmapOffset, const unsigned int maxPBRBounces) {
+    torch::Tensor envmapOffset, const unsigned int maxPBRBounces,
+    torch::Tensor lights) {
 
   // ----- 3dgrt launch params -----
   const torch::TensorOptions opts =
@@ -405,6 +428,26 @@ HybridOptixTracer::traceHybrid(
                              sizeof(PBRMaterial) * numMaterials,
                              cudaMemcpyHostToDevice, cudaStream));
   paramsHost.numMaterials = numMaterials;
+
+  // -- Light sources (Phase II): upload device array, same async pattern as
+  //    materials above. numLights == 0 -> nullptr (kernel skips lighting).
+  syncLights(lights);
+  unsigned int numLights =
+      static_cast<unsigned int>(_playgroundState->lights.size());
+  if (numLights > 0) {
+    CUDA_CHECK(cudaMallocAsync(
+        reinterpret_cast<void **>(
+            const_cast<PlaygroundLight **>(&paramsHost.lights)),
+        sizeof(PlaygroundLight) * numLights, cudaStream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        reinterpret_cast<void *>(
+            const_cast<PlaygroundLight *>(paramsHost.lights)),
+        _playgroundState->lights.data(), sizeof(PlaygroundLight) * numLights,
+        cudaMemcpyHostToDevice, cudaStream));
+  } else {
+    paramsHost.lights = nullptr;
+  }
+  paramsHost.numLights = numLights;
 
   reallocatePlaygroundParamsDevice(sizeof(paramsHost), cudaStream);
   CUDA_CHECK(cudaMemcpyAsync(
