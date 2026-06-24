@@ -139,10 +139,12 @@ class OptixPrimitiveTypes(IntEnum):
     GLASS = 2
     DIFFUSE = 3
     PBR = 4
+    SHADOW_CATCHER = 5
 
     @classmethod
     def names(cls):
-        return ["None", "Mirror", "Glass", "Diffuse Mesh", "PBR Mesh"]
+        # Index must equal the enum value: names()[t.value] == display name
+        return ["None", "Mirror", "Glass", "Diffuse Mesh", "PBR Mesh", "Shadow Catcher"]
 
 
 @dataclass
@@ -561,6 +563,109 @@ class Primitives:
             refractive_index_tensor=refractive_index_tensor.float(),
             transform=transform,
         )
+
+    def load_external_primitive(
+        self,
+        path: str,
+        primitive_type: OptixPrimitiveTypes,
+        device,
+        name: Optional[str] = None,
+    ) -> str:
+        """Import an externally-generated mesh from an arbitrary file path.
+
+        Unlike `add_primitive` -- which looks up a pre-scanned asset key and
+        auto-scales the mesh to the scene -- this entry point imports directly
+        from `path` and does NOT recenter or auto-scale the geometry: the mesh is
+        placed exactly as authored. This preserves any external alignment (e.g. a
+        shadow-catcher proxy aligned to the GS ground). See shadow-catcher
+        contract C9/C10.
+
+        Args:
+            path (str): Path to an external mesh file (.obj/.glb/.gltf).
+            primitive_type (OptixPrimitiveTypes): Type to tag the faces with.
+            device: Device to create tensors on (e.g. 'cuda').
+            name (Optional[str]): Primitive name; defaults to file stem + counter.
+
+        Returns:
+            str: The unique primitive name registered in `self.objects`.
+        """
+        geometry_type = Path(path).stem.capitalize()
+        if name is None:
+            self.instance_counter[geometry_type] = self.instance_counter.get(geometry_type, 0) + 1
+            name = f"{geometry_type} {self.instance_counter[geometry_type]}"
+
+        # Import as-authored: no recenter, no autoscale -> preserve alignment (C9).
+        mesh = load_mesh(path, device, recenter=False)
+        materials = load_materials(mesh, device)
+        if len(materials) > 0:
+            load_missing_material_info(path, materials, device)
+            material_index_mapping = self.register_materials(materials=materials, model_name=geometry_type)
+            material_index_mapping = material_index_mapping.to(device=device)
+            material_id = mesh.material_assignments.to(device=device, dtype=torch.long)
+            mesh.material_assignments = material_index_mapping[material_id].int()
+        mesh.material_assignments = torch.max(mesh.material_assignments, torch.zeros_like(mesh.material_assignments))
+
+        num_verts = len(mesh.vertices)
+        num_faces = len(mesh.faces)
+        is_precomputed_tangents = mesh.has_attribute("vertex_tangents") and mesh.vertex_tangents is not None
+        has_tangents = (
+            torch.ones([num_verts, 1], device=device, dtype=torch.bool)
+            if is_precomputed_tangents
+            else torch.zeros([num_verts, 1], device=device, dtype=torch.bool)
+        )
+        vertex_tangents = (
+            mesh.vertex_tangents
+            if is_precomputed_tangents
+            else torch.zeros([num_verts, 3], device=device, dtype=torch.float)
+        )
+
+        # Identity transform: deliberately NO autoscale / NO recenter (C9).
+        transform = ObjectTransform(device=device)
+        prim_type_tensor = mesh.faces.new_full(size=(num_faces,), fill_value=primitive_type.value)
+        reflectance_scatter = mesh.faces.new_zeros(size=(num_faces,))
+        refractive_index = Primitives.DEFAULT_REFRACTIVE_INDEX
+        refractive_index_tensor = mesh.faces.new_full(size=(num_faces,), fill_value=refractive_index)
+
+        self.objects[name] = OptixPrimitive(
+            geometry_type=geometry_type,
+            vertices=mesh.vertices.float(),
+            triangles=mesh.faces.int(),
+            vertex_normals=mesh.vertex_normals.float(),
+            has_tangents=has_tangents.bool(),
+            vertex_tangents=vertex_tangents.float(),
+            material_uv=mesh.face_uvs.float(),
+            material_id=mesh.material_assignments.unsqueeze(1).int(),
+            primitive_type=primitive_type,
+            primitive_type_tensor=prim_type_tensor.int(),
+            reflectance_scatter=reflectance_scatter.float(),
+            refractive_index=refractive_index,
+            refractive_index_tensor=refractive_index_tensor.float(),
+            transform=transform,
+        )
+        self.dirty = True
+        self.rebuild_bvh_if_needed(force=True, rebuild=True)
+        return name
+
+    def add_shadow_catcher(self, path: str, device, name: Optional[str] = None) -> str:
+        """Import an external proxy mesh as a SHADOW_CATCHER primitive (C9/C10).
+
+        Convenience wrapper over `load_external_primitive` with the SHADOW_CATCHER
+        type. The mesh is imported as-authored (no recenter / no autoscale) so its
+        external alignment with the GS ground is preserved.
+
+        Note: until the OptiX kernel gains a SHADOW_CATCHER branch (a later phase),
+        the catcher does not yet produce shadows; this only establishes the
+        geometry/data path.
+
+        Args:
+            path (str): Path to an external mesh file (.obj/.glb/.gltf).
+            device: Device to create tensors on (e.g. 'cuda').
+            name (Optional[str]): Optional primitive name.
+
+        Returns:
+            str: The registered primitive name.
+        """
+        return self.load_external_primitive(path, OptixPrimitiveTypes.SHADOW_CATCHER, device, name)
 
     def remove_primitive(self, name: str) -> None:
         """Removes a primitive from the scene and updates the BVH.
@@ -1138,6 +1243,27 @@ class Engine3DGRUT:
         Materials and textures will be uploaded to the GPU with the next rendering pass.
         """
         self.is_materials_dirty = True
+
+    def load_shadow_catcher(self, path: str, name: Optional[str] = None) -> str:
+        """Import an externally-generated shadow-catcher mesh into the scene.
+
+        The mesh is tagged as a SHADOW_CATCHER primitive and imported exactly as
+        authored (no recenter / no autoscale), so its alignment with the GS ground
+        -- produced by the external generation pipeline -- is preserved. See
+        shadow-catcher contract C9/C10.
+
+        Note: until the kernel gains a SHADOW_CATCHER branch (a later phase), the
+        catcher does not yet cast shadows; this entry point establishes the
+        geometry/data path only.
+
+        Args:
+            path (str): Path to an external mesh file (.obj/.glb/.gltf).
+            name (Optional[str]): Optional primitive name.
+
+        Returns:
+            str: The registered primitive name.
+        """
+        return self.primitives.add_shadow_catcher(path, self.device, name)
 
     @torch.cuda.nvtx.range("load_3dgrt_object")
     def load_3dgrt_object(
