@@ -165,9 +165,15 @@ def load_materials(mesh, device):
 
 
 @torch.no_grad()
-def load_mesh(path: str, device):
+def load_mesh(path: str, device, recenter: bool = True):
     """Load mesh from path with kaolin.
     Supported formats: .obj, .gltf, .glb
+
+    Args:
+        recenter: If True (default), translate the mesh so its centroid sits at
+            the origin. Pass False to keep the mesh at its authored world
+            position -- e.g. for an externally-aligned shadow-catcher proxy whose
+            placement relative to the GS scene must be preserved.
     """
     format = Path(path).suffix
     if format in (".obj", ".gltf", ".glb"):
@@ -179,8 +185,9 @@ def load_mesh(path: str, device):
 
     mesh = mesh.float_tensors_to(torch.float32)
 
-    # Center object
-    mesh.vertices -= mesh.vertices.mean(dim=0)
+    # Center object (skipped to preserve externally-authored alignment)
+    if recenter:
+        mesh.vertices -= mesh.vertices.mean(dim=0)
 
     # Compute vertex normals if needed
     if not mesh.has_attribute("vertex_normals") or len(mesh.vertex_normals) == 0:

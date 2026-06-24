@@ -20,7 +20,9 @@ enum PlaygroundPrimitiveTypes {
   PGRNDPrimitiveMirror = 1,
   PGRNDPrimitiveGlass = 2,
   PGRNDPrimitiveDiffuse = 3,
-  PGRNDPrimitivePBR = 4
+  PGRNDPrimitivePBR = 4,
+  PGRNDPrimitiveShadowCatcher = 5 // Primary rays pass through; not a caster of
+                                  // its own shadow rays
 };
 
 enum PlaygroundTraceState {
