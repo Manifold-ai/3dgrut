@@ -117,6 +117,52 @@ class PBRMaterial:
     ior: float = 1.0
 
 
+class LightType(IntEnum):
+    """Light source type, mirrors C++ PlaygroundLightType. Phase II: DIRECTIONAL only."""
+
+    NONE = 0
+    DIRECTIONAL = 1
+    # future: POINT = 2, SPOT = 3, ENVMAP_IS = 4
+
+    @classmethod
+    def names(cls):
+        return ["None", "Directional"]
+
+
+@dataclass
+class Light:
+    """A single explicit light source. Fields map 1:1 to the C++ PlaygroundLight
+    struct (contract C2). `direction` is a unit vector pointing FROM the shading
+    point TO the light, in world space (contract R6).
+    """
+
+    light_type: int = int(LightType.DIRECTIONAL)
+    direction: Tuple[float, float, float] = (0.0, -1.0, 0.0)  # to light, world space
+    color: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # linear RGB
+    intensity: float = 1.0
+    angular_radius: float = 0.0  # radians; 0 = hard shadow, > 0 = soft (Phase 4)
+
+    def to_row(self) -> List[float]:
+        """Serialize to the 9 columns of contract C8: [type, dir.xyz, color.rgb,
+        intensity, angularRadius]. Direction is normalized defensively (C2).
+        """
+        dx, dy, dz = self.direction
+        norm = (dx * dx + dy * dy + dz * dz) ** 0.5
+        if norm > 1e-8:
+            dx, dy, dz = dx / norm, dy / norm, dz / norm
+        return [
+            float(self.light_type),
+            dx,
+            dy,
+            dz,
+            float(self.color[0]),
+            float(self.color[1]),
+            float(self.color[2]),
+            float(self.intensity),
+            float(self.angular_radius),
+        ]
+
+
 #################################
 ##     --- OPTIX STRUCTS ---   ##
 #################################
@@ -967,6 +1013,45 @@ class Engine3DGRUT:
         """
         self.is_materials_dirty = False
 
+        """ Explicit light sources (Phase II infrastructure; consumed by shadow rays in Phase III).
+        Empty list == no direct lighting / no shadows, byte-for-byte identical to prior behavior.
+        """
+        self.lights: List[Light] = []
+        """ Marks light parameters as changed; viewers may use it to reset progressive accumulation. """
+        self._lights_dirty: bool = True
+
+    def add_light(self, light: Optional[Light] = None, **kwargs) -> int:
+        """Append a light, returning its index. If ``light`` is None, builds ``Light(**kwargs)``."""
+        self.lights.append(light if light is not None else Light(**kwargs))
+        self._lights_dirty = True
+        return len(self.lights) - 1
+
+    def update_light(self, index: int, **kwargs) -> None:
+        """In-place update of light fields (direction/color/intensity/angular_radius/light_type)."""
+        light = self.lights[index]
+        for key, value in kwargs.items():
+            setattr(light, key, value)
+        self._lights_dirty = True
+
+    def remove_light(self, index: int) -> None:
+        """Remove the light at ``index``."""
+        del self.lights[index]
+        self._lights_dirty = True
+
+    def clear_lights(self) -> None:
+        """Remove all lights."""
+        self.lights.clear()
+        self._lights_dirty = True
+
+    def _build_lights_tensor(self) -> torch.Tensor:
+        """Pack ``self.lights`` into the contract-C8 ``[N, 9]`` float32 CUDA tensor.
+        Empty -> ``[0, 9]`` (kernel sees numLights == 0, lighting/shadows disabled).
+        """
+        if len(self.lights) == 0:
+            return torch.empty([0, 9], dtype=torch.float32, device=self.device)
+        rows = [light.to_row() for light in self.lights]
+        return torch.tensor(rows, dtype=torch.float32, device=self.device).contiguous()
+
     def _accumulate_to_buffer(self, prev_frames, new_frame, num_frames_accumulated, gamma, batch_size=1):
         """Accumulate a new frame to the buffer, using the previous frames and the current frame."""
         prev_frames = torch.pow(prev_frames, gamma)
@@ -1082,7 +1167,9 @@ class Engine3DGRUT:
             envmap=envmap,
             envmap_offset=envmap_offset,
             max_pbr_bounces=self.max_pbr_bounces,
+            lights=self._build_lights_tensor(),
         )
+        self._lights_dirty = False
 
         pred_rgb = rendered_results["pred_rgb"]
         pred_opacity = rendered_results["pred_opacity"]

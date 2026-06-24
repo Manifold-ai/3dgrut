@@ -46,6 +46,27 @@ struct alignas(16) PBRMaterial {
                // --> mem 16 byte aligned
 };
 
+// -- Light sources (Phase II: directional) --
+// Explicit byte layout locks host(std::vector)/device ABI parity and keeps the
+// offset map readable. Note: CUDA float3 is 4-byte aligned (only float4 is 16B),
+// so there is no implicit padding here; pad0 just places direction at offset 16.
+enum PlaygroundLightType {
+  PGRNDLightNone = 0,
+  PGRNDLightDirectional = 1
+  // future: PGRNDLightPoint = 2, PGRNDLightSpot = 3, PGRNDLightEnvmapIS = 4
+};
+
+struct alignas(16) PlaygroundLight {
+  unsigned int type;          // 4 bytes  -> offset 4  ; PlaygroundLightType
+  float        pad0[3];       // 12 bytes -> offset 16 ; pad so direction starts at offset 16
+  float3       direction;     // 12 bytes -> offset 28 ; unit vec, shading point -> light (world)
+  float        intensity;     // 4 bytes  -> offset 32 ; scalar multiplier
+  float3       color;         // 12 bytes -> offset 44 ; linear RGB
+  float        angularRadius; // 4 bytes  -> offset 48 ; radians; 0=hard, >0=soft (Phase 4)
+};                            // sizeof == 48, 16-byte aligned
+static_assert(sizeof(PlaygroundLight) == 48,
+              "PlaygroundLight must be 48 bytes for host/device ABI parity");
+
 struct PlaygroundPipelineParameters : PipelineParameters {
   PackedTensorAccessor32<float, 3> rayMaxT; ///< ray max t for termination
   cudaTextureObject_t envmap; // for envmaps and solid background color
@@ -80,4 +101,8 @@ struct PlaygroundPipelineParameters : PipelineParameters {
   PackedTensorAccessor32<int32_t, 2> primType; // see PlaygroundPrimitiveTypes
   PackedTensorAccessor32<float, 2>
       refractiveIndex; // glass refraction, higher -> thicker glass
+
+  // -- Light sources (Phase II) --
+  const PlaygroundLight *lights; // device array; nullptr when numLights == 0
+  unsigned int numLights;        // number of lights, may be 0
 };

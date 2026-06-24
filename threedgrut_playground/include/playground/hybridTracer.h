@@ -98,6 +98,9 @@ protected:
                                         /// so we don't re-upload every frame
     std::vector<Textures> textures;     /// caches textures allocated on gpu
 
+    std::vector<PlaygroundLight> lights; /// host cache of lights, filled by
+                                         /// syncLights then uploaded each frame
+
     // Denoiser
     OptixDenoiserWrapper denoiser;
   } *_playgroundState;
@@ -125,6 +128,10 @@ public:
                      const std::vector<CPBRMaterial> &materials,
                      cudaStream_t cudaStream);
 
+  // Parses a [N, 9] float32 light tensor (contract C8) into the host cache
+  // _playgroundState->lights. N == 0 leaves the cache empty.
+  void syncLights(const torch::Tensor &lights);
+
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
              torch::Tensor>
   traceHybrid(uint32_t frameNumber, torch::Tensor rayToWorld,
@@ -138,7 +145,7 @@ public:
               const std::vector<CPBRMaterial> &materials,
               bool shouldSyncMaterials, torch::Tensor refractiveIndex,
               torch::Tensor envmap, torch::Tensor envmapOffset,
-              const unsigned int maxPBRBounces);
+              const unsigned int maxPBRBounces, torch::Tensor lights);
 
   torch::Tensor denoise(torch::Tensor rayRad);
 };
