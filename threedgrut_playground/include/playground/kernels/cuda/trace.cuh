@@ -29,6 +29,7 @@
 #include <3dgrt/kernels/cuda/3dgrtTracer.cuh>
 #include <optix.h>
 #include <playground/kernels/cuda/mathUtils.cuh>
+#include <playground/kernels/cuda/rng.cuh>
 #include <playground/pipelineDefinitions.h>
 #include <playground/pipelineParameters.h>
 
@@ -65,6 +66,14 @@ struct HybridRayPayload {
   float3 nextEmissive; // Light emitted due to last PBR surface hit
                        // recomputed each iteration
   bool rayMissed;      // True if ray missed the mesh primitives
+
+  // -- Shadow catcher (Phase III, contract C3) --
+  float shadowVisibility; // [0,1] aggregated visibility at the shadow-catcher
+                          // hit (1 = unoccluded, 0 = fully occluded)
+  int hitShadowCatcher;   // 0/1: did this iteration's primary ray hit a shadow
+                          // catcher (gates the multiply on the next GS segment)
+  int occluded;           // internal scratch: shadow ray hit a solid occluder
+                          // (set in __anyhit__ah shadow branch; not cross-layer)
 };
 
 constexpr float epsT = 1e-9; // Minimal offset to ray t to avoid zero t
@@ -227,6 +236,73 @@ static __device__ __forceinline__ float4 traceGaussians(
                   rayData.density - prevRayData.density);
 
   return accumulated_radiance;
+}
+
+// -- Shadow / occlusion rays (Phase III, contract C6) --
+constexpr float SHADOW_RAY_EPS = 1e-4f; // lift ray origin off the surface
+constexpr float SHADOW_MAX_T = 1e16f;   // directional light: effectively infinite
+constexpr int SOFT_SHADOW_SPP = 8;      // soft-shadow samples/light (Phase 4: expose)
+
+// Single occlusion ray on the mesh BVH. Returns true if a solid (non shadow
+// catcher) primitive occludes. The shadow catcher itself is ignored in the
+// shadow branch of __anyhit__ah (contract C5). anyhit MUST stay enabled.
+static __device__ __forceinline__ bool
+traceOcclusion(const float3 ori, const float3 dir, HybridRayPayload *payload) {
+  setNextTraceState(PGRNDTraceShadowRayPass); // route __anyhit__ah to occlusion
+  payload->occluded = 0;                      // internal scratch
+
+  unsigned int p0, p1;
+  packPointer(payload, p0, p1);
+  optixTrace(params.triHandle, ori, dir,
+             SHADOW_RAY_EPS,                        // tmin
+             SHADOW_MAX_T,                          // tmax (directional: far)
+             0.0f,                                  // rayTime
+             OptixVisibilityMask(255),
+             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT, // NOTE: anyhit stays ENABLED
+             0, 1, 0,                               // SBT offset / stride / miss
+             p0, p1);
+  return payload->occluded != 0;
+}
+
+// Sample a direction within a cone of half-angle `angularRadius` around `dir`
+// (uniform over solid angle). Used for soft shadows.
+static __device__ __forceinline__ float3
+sampleConeDirection(const float3 dir, float angularRadius, unsigned int &seed) {
+  const float u1 = rnd(seed);
+  const float u2 = rnd(seed);
+  const float cosThetaMax = cosf(angularRadius);
+  const float cosTheta = 1.0f - u1 * (1.0f - cosThetaMax);
+  const float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
+  const float phi = 2.0f * M_PIf * u2;
+  const float3 w = dir; // cone axis (+z of the local frame)
+  const float3 a = (fabsf(w.x) > 0.1f) ? make_float3(0.0f, 1.0f, 0.0f)
+                                       : make_float3(1.0f, 0.0f, 0.0f);
+  const float3 v = safe_normalize(cross(a, w));
+  const float3 u = cross(w, v);
+  return safe_normalize(cosf(phi) * sinTheta * u + sinf(phi) * sinTheta * v +
+                        cosTheta * w);
+}
+
+// Visibility of `surfPos` toward `light`, in [0,1]. Hard shadow = 1 ray;
+// soft shadow (angularRadius > 0) averages SOFT_SHADOW_SPP rays in the cone.
+static __device__ __forceinline__ float
+traceShadow(const float3 surfPos, const PlaygroundLight &light) {
+  HybridRayPayload *payload = getRayPayload();
+  const float3 L = light.direction; // contract C2/R6: from shading point to light
+  const float3 ori = surfPos + SHADOW_RAY_EPS * L;
+
+  if (light.angularRadius <= 0.0f)
+    return traceOcclusion(ori, L, payload) ? 0.0f : 1.0f;
+
+  unsigned int seed = payload->rndSeed;
+  int unblocked = 0;
+  for (int s = 0; s < SOFT_SHADOW_SPP; ++s) {
+    const float3 sdir = sampleConeDirection(L, light.angularRadius, seed);
+    if (!traceOcclusion(ori, sdir, payload))
+      ++unblocked;
+  }
+  payload->rndSeed = seed;
+  return (float)unblocked / (float)SOFT_SHADOW_SPP;
 }
 
 static __device__ __forceinline__ float3

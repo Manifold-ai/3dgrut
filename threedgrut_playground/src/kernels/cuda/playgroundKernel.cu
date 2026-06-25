@@ -62,6 +62,9 @@ extern "C" __global__ void __raygen__rg() {
   payload.bsdfValue = make_float3(1.0);
   payload.pbrNumBounces = 0;
   payload.rayMissed = false;
+  // Initialize Payload shadow-catcher fields (contract C3)
+  payload.shadowVisibility = 1.0f;
+  payload.hitShadowCatcher = 0;
 
   // Initialize 3drt output buffers, we'll soon aggregate in them
   RayData rayData;
@@ -107,6 +110,11 @@ extern "C" __global__ void __raygen__rg() {
         make_float3(volumetricRadDns.x, volumetricRadDns.y, volumetricRadDns.z);
     float density = volumetricRadDns.w;
 
+    // -- Shadow catcher (contract C7): if this iteration hit a shadow catcher,
+    // dim the GS segment reaching the ground by the occlusion visibility.
+    if (payload.hitShadowCatcher)
+      radiance *= payload.shadowVisibility;
+
     // -- Now accumulate the radiance collected along this path:
     // TODO (operel): The following will not suffice for pbr primitives with
     // transmittance, maybe bookkeep directLight and pathThroughput at mesh
@@ -135,6 +143,9 @@ extern "C" __global__ void __raygen__rg() {
     // shader
     lastRayOri = rayOri;
     lastRayDir = rayDir;
+
+    // Shadow catcher (contract C7): visibility consumed this iteration; reset.
+    payload.hitShadowCatcher = 0;
 
     timeout += 1;
     if (timeout > TIMEOUT_ITERATIONS)
@@ -250,6 +261,35 @@ static __device__ __inline__ void handleDiffuse(const float3 ray_o,
   payload->accumulatedAlpha += surfaceAlpha;
 }
 
+constexpr float SHADOW_CATCHER_EPS = 1e-4f; // advance hit point past the catcher
+
+// Shadow catcher: transparent to the primary ray (pass-through), opaque to
+// shadow rays. Aggregates per-light visibility at the hit point and stores it
+// so the following GS segment (the ground) gets multiplied down (contract
+// C6/C7). numLights == 0 leaves visibility at 1.0 (no dimming).
+static __device__ __inline__ void handleShadowCatcher(const float3 ray_o,
+                                                      const float3 ray_d,
+                                                      float &hit_t,
+                                                      const float3 normal,
+                                                      HybridRayPayload *payload) {
+  (void)normal; // available for an optional backface cull; unused in base impl
+  const float3 surfPos = ray_o + hit_t * ray_d;
+
+  float visibility = 1.0f;
+  if (params.numLights > 0) {
+    float acc = 0.0f;
+    for (unsigned int i = 0; i < params.numLights; ++i)
+      acc += traceShadow(surfPos, params.lights[i]);
+    visibility = acc / (float)params.numLights; // multi-light: mean aggregate
+  }
+
+  payload->shadowVisibility = visibility; // consumed by the next GS segment (C7)
+  payload->hitShadowCatcher = 1;          // mark: this iteration hit a catcher
+
+  // pass-through: keep rayDir, don't consume bounces, don't add own color.
+  hit_t += SHADOW_CATCHER_EPS; // advance so the ray passes through the catcher
+}
+
 static __device__ __inline__ float3 getSmoothNormal() {
   // Uses interpolated vertex normals to get a smooth varying interpolated
   // normal
@@ -329,7 +369,13 @@ extern "C" __global__ void __closesthit__ch() {
   } else if (intersected_type == PGRNDPrimitivePBR)
     handlePBR(ray_o, ray_d, normal, numBounces, hit_t, new_ray_dir, rndSeed,
               payload);
-  else
+  else if (intersected_type == PGRNDPrimitiveShadowCatcher) {
+    handleShadowCatcher(ray_o, ray_d, hit_t, normal, payload);
+    new_ray_dir = ray_d; // pass-through: keep direction (no redirection)
+    // Resets the per-ray trace-state (left at ShadowRayPass by the occlusion
+    // rays) back to the GS pass so the ray continues into the ground segment.
+    next_render_pass = PGRNDTraceRTGaussiansPass;
+  } else
     new_ray_dir = ray_d; // Do nothing
 
   // -- Write outputs to payload --
@@ -351,9 +397,26 @@ extern "C" __global__ void __closesthit__ch() {
 extern "C" __global__ void __intersection__is() { intersectVolumetricGS(); }
 
 extern "C" __global__ void __anyhit__ah() {
-  // Enabled only for Gaussian ray tracing
-  if (getNextTraceState() == PGRNDTraceRTGaussiansPass)
+  const unsigned int state = getNextTraceState();
+
+  // Gaussian volumetric sorting any-hit -- unchanged.
+  if (state == PGRNDTraceRTGaussiansPass) {
     anyhitSortVolumetricGS();
+    return;
+  }
+
+  // Shadow / occlusion ray (contract C5/R2): the shadow catcher does not cast
+  // its own shadow -> ignore it so traversal continues; any other (solid) hit
+  // counts as an occluder and, with OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+  // terminates traversal here.
+  if (state == PGRNDTraceShadowRayPass) {
+    const unsigned int triId = optixGetPrimitiveIndex();
+    if (params.primType[triId][0] == PGRNDPrimitiveShadowCatcher) {
+      optixIgnoreIntersection(); // catcher is transparent to shadow rays
+    } else {
+      getRayPayload()->occluded = 1; // a solid occludes
+    }
+  }
 }
 
 extern "C" __global__ void __miss__ms() {
