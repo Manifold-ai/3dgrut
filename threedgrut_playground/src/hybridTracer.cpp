@@ -310,23 +310,24 @@ void HybridOptixTracer::syncMaterials(
 }
 
 void HybridOptixTracer::syncLights(const torch::Tensor &lights) {
-  // lights: [N, 9] float32 (contract C8). Parse row-by-row into host cache.
+  // lights: [N, 12] float32 (contract C8). Parse row-by-row into host cache.
   const torch::Tensor lightsCpu = lights.to(torch::kCPU).contiguous();
-  const int64_t numLights = lightsCpu.size(0); // N == 0 -> [0, 9] empty tensor
+  const int64_t numLights = lightsCpu.size(0); // N == 0 -> [0, 12] empty tensor
   _playgroundState->lights.resize(numLights);
   if (numLights == 0)
     return;
 
   const float *p = lightsCpu.data_ptr<float>();
-  constexpr int STRIDE = 9; // column order: see contract C8
+  constexpr int STRIDE = 12; // column order: see contract C8
   for (int64_t i = 0; i < numLights; ++i) {
     const float *row = p + i * STRIDE;
     PlaygroundLight &L = _playgroundState->lights[i];
-    L.type = static_cast<unsigned int>(row[0]); // 0=None, 1=Directional
+    L.type = static_cast<unsigned int>(row[0]); // 0=None, 1=Directional, 2=Point
     L.direction = make_float3(row[1], row[2], row[3]);
     L.color = make_float3(row[4], row[5], row[6]);
     L.intensity = row[7];
     L.angularRadius = row[8];
+    L.position = make_float3(row[9], row[10], row[11]); // world-space; point light
     // direction normalization / orientation is guaranteed Python-side (C2/R6).
   }
 }
