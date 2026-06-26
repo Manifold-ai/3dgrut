@@ -126,12 +126,14 @@ extern "C" __global__ void __raygen__rg() {
         make_float3(volumetricRadDns.x, volumetricRadDns.y, volumetricRadDns.z);
     float density = volumetricRadDns.w;
 
-    // -- Shadow catcher (R5-strict): a catcher's shadow dims the GS segment
-    // AFTER it (the real ground GS, integrated next iteration), not the
-    // camera->catcher segment. Multiply this segment by the visibility carried
-    // from the previous catcher hit, then carry this iteration's catcher
-    // visibility forward (1.0 = no pending shadow).
-    radiance *= payload.pendingShadowVis;
+    // -- Shadow catcher (R5-strict + shadow_min): a catcher's shadow dims the
+    // GS segment AFTER it (the real ground GS, integrated next iteration), not
+    // the camera->catcher segment. Apply the visibility carried from the
+    // previous catcher hit, remapped through shadow_min so visibility=0 yields a
+    // `shadow_min` floor instead of dead black; then carry this iteration's
+    // catcher visibility forward (1.0 = no pending shadow).
+    radiance *= params.shadowMin +
+                (1.0f - params.shadowMin) * payload.pendingShadowVis;
     payload.pendingShadowVis =
         payload.hitShadowCatcher ? payload.shadowVisibility : 1.0f;
 

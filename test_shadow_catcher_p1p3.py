@@ -70,6 +70,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--light_dir", default="0,-1,0", type=vec3)
     p.add_argument("--intensity", type=float, default=3.0)
     p.add_argument("--soft_angle", type=float, default=0.05)
+    p.add_argument("--shadow_min", type=float, default=0.0, help="Shadow floor in [0,1]: 0=shadows reach black, 0.2=darkest keeps 20%")
+    p.add_argument("--shadow_spp", type=int, default=128, help="Soft-shadow occlusion samples per light (used when --soft_angle>0)")
     p.add_argument("--tol", type=float, default=2e-2, help="Tolerance for the A==B / A==C regression checks")
     p.add_argument("--skip_assert", action="store_true", help="Only render + save, skip numeric asserts")
     return p.parse_args()
@@ -91,6 +93,8 @@ def main() -> int:
         engine.spp.spp = args.spp
         engine.antialiasing_mode = "Quasi-Random (Sobol)"
     engine.use_optix_denoiser = args.denoise
+    engine.shadow_min = args.shadow_min
+    engine.shadow_spp = args.shadow_spp
     engine.camera_type = "Pinhole"
     engine.camera_fov = 60.0
     if (args.spp > 0 or args.denoise) and not args.skip_assert:

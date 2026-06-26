@@ -343,7 +343,7 @@ HybridOptixTracer::traceHybrid(
     const std::vector<CPBRMaterial> &materials, bool shouldSyncMaterials,
     torch::Tensor refractiveIndex, torch::Tensor envmap,
     torch::Tensor envmapOffset, const unsigned int maxPBRBounces,
-    torch::Tensor lights) {
+    torch::Tensor lights, float shadowMin, unsigned int shadowSpp) {
 
   // ----- 3dgrt launch params -----
   const torch::TensorOptions opts =
@@ -404,6 +404,8 @@ HybridOptixTracer::traceHybrid(
   paramsHost.matID = packed_accessor32<int32_t, 2>(matID);
   paramsHost.refractiveIndex = packed_accessor32<float, 2>(refractiveIndex);
   paramsHost.maxPBRBounces = maxPBRBounces;
+  paramsHost.shadowMin = shadowMin;
+  paramsHost.shadowSpp = shadowSpp;
   paramsHost.playgroundOpts = playgroundOpts;
   paramsHost.triHandle = _playgroundState->gasHandle;
   paramsHost.trace_state = packed_accessor32<int32_t, 4>(traceState);

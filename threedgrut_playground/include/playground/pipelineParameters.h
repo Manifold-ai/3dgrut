@@ -79,6 +79,9 @@ struct PlaygroundPipelineParameters : PipelineParameters {
   unsigned int playgroundOpts; // see PlaygroundRenderOptions
   unsigned int maxPBRBounces;  // Maximum PBR ray iterations (reflections,
                                // transmissions & refractions)
+  float shadowMin;             // shadow-catcher floor: radiance *= shadowMin +
+                               // (1-shadowMin)*visibility (0 = shadows reach black)
+  unsigned int shadowSpp;      // soft-shadow occlusion samples per light
   PackedTensorAccessor32<int32_t, 4>
       trace_state; // Scratch buffer, stores current render pass per ray
   PackedTensorAccessor32<int32_t, 2>

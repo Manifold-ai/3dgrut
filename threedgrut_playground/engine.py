@@ -991,6 +991,10 @@ class Engine3DGRUT:
         self.gamma_correction = 1.0
         """ Maximum number of PBR material bounces (transmissions & refractions, reflections) """
         self.max_pbr_bounces = 15
+        """ Shadow-catcher floor in [0,1]: 0 = shadows can reach full black; 0.2 = darkest shadow keeps 20% """
+        self.shadow_min = 0.0
+        """ Soft-shadow occlusion samples per light (only used when a light has angular_radius > 0) """
+        self.shadow_spp = 128
         """ If enabled, will use the optix denoiser as post-processing """
         self.use_optix_denoiser = True
         """ Enables / disables gaussian rendering """
@@ -1168,6 +1172,8 @@ class Engine3DGRUT:
             envmap_offset=envmap_offset,
             max_pbr_bounces=self.max_pbr_bounces,
             lights=self._build_lights_tensor(),
+            shadow_min=self.shadow_min,
+            shadow_spp=self.shadow_spp,
         )
         self._lights_dirty = False
 
