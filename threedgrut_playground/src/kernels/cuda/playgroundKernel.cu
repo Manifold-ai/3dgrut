@@ -101,6 +101,17 @@ extern "C" __global__ void __raygen__rg() {
     // Trace the ray against BVH of reflective / refractive faces
     traceMesh(rayOri, rayDir, &payload);
 
+    // Shadow catcher (Option B): if the mesh ray hit a catcher, fire the
+    // occlusion rays here -- from raygen, at trace depth 1. The renderer keeps
+    // every optixTrace at depth 1; firing these from inside __closesthit__ch
+    // would be depth 2 and exceed the pipeline's maxTraceDepth=1.
+    if (payload.hitShadowCatcher && params.numLights > 0) {
+      float acc = 0.0f;
+      for (unsigned int i = 0; i < params.numLights; ++i)
+        acc += traceShadow(payload.shadowSurfPos, params.lights[i], &payload);
+      payload.shadowVisibility = acc / (float)params.numLights;
+    }
+
     // Then perform volumetric radiance integration from ray origin to closest
     // hit point (or infinity is ray missed)
     float next_ray_t = payload.rayMissed ? ray_t_max : payload.t_hit;
@@ -273,18 +284,13 @@ static __device__ __inline__ void handleShadowCatcher(const float3 ray_o,
                                                       const float3 normal,
                                                       HybridRayPayload *payload) {
   (void)normal; // available for an optional backface cull; unused in base impl
-  const float3 surfPos = ray_o + hit_t * ray_d;
 
-  float visibility = 1.0f;
-  if (params.numLights > 0) {
-    float acc = 0.0f;
-    for (unsigned int i = 0; i < params.numLights; ++i)
-      acc += traceShadow(surfPos, params.lights[i]);
-    visibility = acc / (float)params.numLights; // multi-light: mean aggregate
-  }
-
-  payload->shadowVisibility = visibility; // consumed by the next GS segment (C7)
-  payload->hitShadowCatcher = 1;          // mark: this iteration hit a catcher
+  // Option B: do NOT trace occlusion here. CH runs at trace depth 1; firing a
+  // shadow ray from within it would be depth 2, exceeding the pipeline's
+  // maxTraceDepth=1 (silent failure). Instead record the catcher hit point and
+  // a flag; raygen fires the occlusion rays at depth 1 (see __raygen__rg).
+  payload->shadowSurfPos = ray_o + hit_t * ray_d; // true catcher surface point
+  payload->hitShadowCatcher = 1;                  // mark: this iteration hit a catcher
 
   // pass-through: keep rayDir, don't consume bounces, don't add own color.
   hit_t += SHADOW_CATCHER_EPS; // advance so the ray passes through the catcher
@@ -372,8 +378,8 @@ extern "C" __global__ void __closesthit__ch() {
   else if (intersected_type == PGRNDPrimitiveShadowCatcher) {
     handleShadowCatcher(ray_o, ray_d, hit_t, normal, payload);
     new_ray_dir = ray_d; // pass-through: keep direction (no redirection)
-    // Resets the per-ray trace-state (left at ShadowRayPass by the occlusion
-    // rays) back to the GS pass so the ray continues into the ground segment.
+    // Catcher is transparent to the primary ray; continue into the GS ground
+    // segment. (Occlusion is now tested from raygen at depth 1, not here.)
     next_render_pass = PGRNDTraceRTGaussiansPass;
   } else
     new_ray_dir = ray_d; // Do nothing

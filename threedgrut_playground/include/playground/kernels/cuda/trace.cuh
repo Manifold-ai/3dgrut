@@ -74,6 +74,9 @@ struct HybridRayPayload {
                           // catcher (gates the multiply on the next GS segment)
   int occluded;           // internal scratch: shadow ray hit a solid occluder
                           // (set in __anyhit__ah shadow branch; not cross-layer)
+  float3 shadowSurfPos;   // internal scratch: catcher hit point, carried from
+                          // __closesthit__ch to raygen so the depth-1 occlusion
+                          // rays can be fired from raygen (Option B)
 };
 
 constexpr float epsT = 1e-9; // Minimal offset to ray t to avoid zero t
@@ -241,7 +244,7 @@ static __device__ __forceinline__ float4 traceGaussians(
 // -- Shadow / occlusion rays (Phase III, contract C6) --
 constexpr float SHADOW_RAY_EPS = 1e-4f; // lift ray origin off the surface
 constexpr float SHADOW_MAX_T = 1e16f;   // directional light: effectively infinite
-constexpr int SOFT_SHADOW_SPP = 8;      // soft-shadow samples/light (Phase 4: expose)
+constexpr int SOFT_SHADOW_SPP = 128;    // soft-shadow samples/light (Phase 4: expose)
 
 // Single occlusion ray on the mesh BVH. Returns true if a solid (non shadow
 // catcher) primitive occludes. The shadow catcher itself is ignored in the
@@ -258,7 +261,10 @@ traceOcclusion(const float3 ori, const float3 dir, HybridRayPayload *payload) {
              SHADOW_MAX_T,                          // tmax (directional: far)
              0.0f,                                  // rayTime
              OptixVisibilityMask(255),
-             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT, // NOTE: anyhit stays ENABLED
+             // anyhit stays ENABLED (occlusion test); closesthit DISABLED so a
+             // shadow ray hitting a solid mesh never runs handlePBR and pollutes
+             // payload.bsdfValue/nextEmissive (which tinted the shadowed region).
+             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
              0, 1, 0,                               // SBT offset / stride / miss
              p0, p1);
   return payload->occluded != 0;
@@ -286,8 +292,10 @@ sampleConeDirection(const float3 dir, float angularRadius, unsigned int &seed) {
 // Visibility of `surfPos` toward `light`, in [0,1]. Hard shadow = 1 ray;
 // soft shadow (angularRadius > 0) averages SOFT_SHADOW_SPP rays in the cone.
 static __device__ __forceinline__ float
-traceShadow(const float3 surfPos, const PlaygroundLight &light) {
-  HybridRayPayload *payload = getRayPayload();
+traceShadow(const float3 surfPos, const PlaygroundLight &light,
+            HybridRayPayload *payload) {
+  // payload is passed in (not getRayPayload()): traceShadow is now called from
+  // __raygen__rg, where there is no ray payload to unpack (Option B, depth 1).
   const float3 L = light.direction; // contract C2/R6: from shading point to light
   const float3 ori = surfPos + SHADOW_RAY_EPS * L;
 
