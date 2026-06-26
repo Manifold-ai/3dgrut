@@ -77,6 +77,8 @@ struct HybridRayPayload {
   float3 shadowSurfPos;   // internal scratch: catcher hit point, carried from
                           // __closesthit__ch to raygen so the depth-1 occlusion
                           // rays can be fired from raygen (Option B)
+  int dbgCatcherEverHit;  // DEBUG v2: persistent (not reset per-iter) flag, set
+                          // when ANY iteration's primary ray hits the catcher
 };
 
 constexpr float epsT = 1e-9; // Minimal offset to ray t to avoid zero t

@@ -65,6 +65,7 @@ extern "C" __global__ void __raygen__rg() {
   // Initialize Payload shadow-catcher fields (contract C3)
   payload.shadowVisibility = 1.0f;
   payload.hitShadowCatcher = 0;
+  payload.dbgCatcherEverHit = 0; // DEBUG v2: persistent across loop iterations
 
   // Initialize 3drt output buffers, we'll soon aggregate in them
   RayData rayData;
@@ -168,6 +169,18 @@ extern "C" __global__ void __raygen__rg() {
   payload.pathThroughput *= (1.0f - payload.accumulatedAlpha);
   payload.accumulatedColor += payload.pathThroughput * payload.directLight;
   payload.accumulatedAlpha = clamp(payload.accumulatedAlpha, 0.0f, 1.0f);
+
+  // DEBUG v2 (temporary, revert after diagnosis): ABSOLUTE override of the final
+  // pixel for any ray whose primary hit the catcher -- bypasses all GS blending
+  // so it cannot be diluted. green = shadowVisibility 1 (occlusion found NO
+  // occluder toward the light); red = visibility 0 (occluded -> real shadow);
+  // +0.4 blue so catcher pixels are unmistakable. Untouched pixels => GS as-is
+  // => primary ray never hit the catcher.
+  if (payload.dbgCatcherEverHit) {
+    payload.accumulatedColor = make_float3(1.0f - payload.shadowVisibility,
+                                           payload.shadowVisibility, 0.4f);
+    payload.accumulatedAlpha = 1.0f;
+  }
 
   // Write back to global mem in launch params
   const float4 rgba =
@@ -377,6 +390,7 @@ extern "C" __global__ void __closesthit__ch() {
               payload);
   else if (intersected_type == PGRNDPrimitiveShadowCatcher) {
     handleShadowCatcher(ray_o, ray_d, hit_t, normal, payload);
+    payload->dbgCatcherEverHit = 1; // DEBUG v2: primary ray DID hit the catcher
     new_ray_dir = ray_d; // pass-through: keep direction (no redirection)
     // Catcher is transparent to the primary ray; continue into the GS ground
     // segment. (Occlusion is now tested from raygen at depth 1, not here.)
