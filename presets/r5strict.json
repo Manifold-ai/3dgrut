@@ -1,0 +1,11 @@
+{
+  "occluder_pos": [2.0, -4.0, 5.0],
+  "occluder_frac": 0.25,
+  "light_dir": [0.6, 1.0, 0.4],
+  "scene_rot": [180.0, 0.0, 0.0],
+  "cam_dist": 0.35,
+  "cam_azimuth": 180.0,
+  "spp": 512,
+  "skip_assert": true,
+  "out": "./shadow_test_out/r5strict"
+}
