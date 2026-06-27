@@ -91,6 +91,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--light_dirs", default="",
                    help="Semicolon-separated extra directional lights for multi-light, "
                         "e.g. '0.6,1,0.4;-0.6,1,0.4;0.6,1,-0.4'. Empty = use the single --light_dir")
+    p.add_argument("--point_pos", default="",
+                   help="POINT-light world position 'x,y,z'. Empty = auto: above the occluder along --light_dir")
+    p.add_argument("--point_dist", type=float, default=0.5,
+                   help="Auto point-light height = point_dist * scene_extent above the occluder (when --point_pos empty)")
     if _presets:
         p.set_defaults(**_presets)  # preset values become defaults; CLI flags still override
     args = p.parse_args()
@@ -107,7 +111,7 @@ def main() -> int:
     os.makedirs(args.out, exist_ok=True)
 
     import kaolin
-    from threedgrut_playground.engine import Engine3DGRUT, Light, OptixPrimitiveTypes
+    from threedgrut_playground.engine import Engine3DGRUT, Light, LightType, OptixPrimitiveTypes
 
     occluder_type = getattr(OptixPrimitiveTypes, args.occluder_type)
 
@@ -220,6 +224,22 @@ def main() -> int:
         for d in _light_dir_list():
             engine.add_light(Light(direction=d, color=(1.0, 1.0, 1.0), intensity=args.intensity, angular_radius=angular_radius))
 
+    def _point_light_pos():
+        # Explicit --point_pos, else auto: above the occluder along --light_dir
+        # (light_dir points shading-point -> light, so the light sits "up-light").
+        if args.point_pos:
+            return tuple(float(x) for x in args.point_pos.split(","))
+        L = torch.tensor(tuple(args.light_dir), dtype=torch.float32)
+        L = L / L.norm().clamp_min(1e-8)
+        occ = torch.tensor(tuple(args.occluder_pos), dtype=torch.float32)
+        return tuple((occ + L * (args.point_dist * _extent)).tolist())
+
+    def add_point_light(angular_radius=0.0, pos=None):
+        engine.add_light(Light(light_type=int(LightType.POINT),
+                               position=tuple(pos if pos is not None else _point_light_pos()),
+                               color=(1.0, 1.0, 1.0), intensity=args.intensity,
+                               angular_radius=angular_radius))
+
     # ---- explicit scene builders (no lambda-tuple tricks) -------------------
     def build_gs_only():
         pass  # nothing added; pure GS -> aim the camera with this one
@@ -261,6 +281,27 @@ def main() -> int:
         for d in dirs:
             engine.add_light(Light(direction=d, color=(1.0, 1.0, 1.0),
                                    intensity=args.intensity, angular_radius=args.soft_angle))
+
+    def build_H_point_light():
+        # Single POINT light: its world position (not a global direction) decides
+        # the shadow, and the occlusion ray's tmax is clamped to the light distance
+        # so geometry behind the light casts no shadow (unlike directional's
+        # parallel, infinite-distance rays). Move --point_pos and the shadow moves.
+        add_occluder()
+        load_catcher()
+        pos = _point_light_pos()
+        print(f"[H    ] point light @ {tuple(round(float(x), 2) for x in pos)}")
+        add_point_light(angular_radius=args.soft_angle, pos=pos)
+
+    def build_I_point_plus_dir():
+        # Point light + parallel (directional) light together -> two overlapping
+        # contact shadows: one radiating from the point's position, one along --light_dir.
+        add_occluder()
+        load_catcher()
+        pos = _point_light_pos()
+        print(f"[I    ] point light @ {tuple(round(float(x), 2) for x in pos)} + directional {tuple(args.light_dir)}")
+        add_point_light(angular_radius=args.soft_angle, pos=pos)
+        add_light(angular_radius=args.soft_angle)
 
     # ---- camera (look-at the catcher center) / render / save ---------------
     _extent = float((gs_hi - gs_lo).max())
@@ -328,6 +369,8 @@ def main() -> int:
     run("E_soft_shadow", build_E_soft_shadow)
     run("F_disable_gs", build_F_disable_gs)
     run("G_multi_light", build_G_multi_light)
+    run("H_point_light", build_H_point_light)
+    run("I_point_plus_dir", build_I_point_plus_dir)
 
     # Shadow diagnostic: B (catcher, no light) - D (catcher + light) = darkening.
     # Normalized so even a faint shadow is visible; the printed max is the true strength.
