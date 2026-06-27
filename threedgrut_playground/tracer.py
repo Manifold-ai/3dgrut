@@ -206,7 +206,7 @@ class Tracer:
         if envmap is None:
             envmap = torch.zeros([4, 4, 4], dtype=torch.float32)
         if envmap_offset is None:
-            envmap = torch.zeros([2], dtype=torch.float32)
+            envmap_offset = torch.zeros([2], dtype=torch.float32)
         if lights is None:
             lights = torch.empty([0, 9], dtype=torch.float32)
 
