@@ -65,6 +65,7 @@ extern "C" __global__ void __raygen__rg() {
   // Initialize Payload shadow-catcher fields (contract C3)
   payload.shadowVisibility = 1.0f;
   payload.hitShadowCatcher = 0;
+  payload.pendingShadowVis = 1.0f; // R5-strict: carried across loop iterations
 
   // Initialize 3drt output buffers, we'll soon aggregate in them
   RayData rayData;
@@ -105,11 +106,15 @@ extern "C" __global__ void __raygen__rg() {
     // occlusion rays here -- from raygen, at trace depth 1. The renderer keeps
     // every optixTrace at depth 1; firing these from inside __closesthit__ch
     // would be depth 2 and exceed the pipeline's maxTraceDepth=1.
-    if (payload.hitShadowCatcher && params.numLights > 0) {
-      float acc = 0.0f;
-      for (unsigned int i = 0; i < params.numLights; ++i)
-        acc += traceShadow(payload.shadowSurfPos, params.lights[i], &payload);
-      payload.shadowVisibility = acc / (float)params.numLights;
+    if (payload.hitShadowCatcher) {
+      float vis = 1.0f; // numLights == 0 -> catcher transparent (visibility 1)
+      if (params.numLights > 0) {
+        float acc = 0.0f;
+        for (unsigned int i = 0; i < params.numLights; ++i)
+          acc += traceShadow(payload.shadowSurfPos, params.lights[i], &payload);
+        vis = acc / (float)params.numLights;
+      }
+      payload.shadowVisibility = vis;
     }
 
     // Then perform volumetric radiance integration from ray origin to closest
@@ -121,10 +126,14 @@ extern "C" __global__ void __raygen__rg() {
         make_float3(volumetricRadDns.x, volumetricRadDns.y, volumetricRadDns.z);
     float density = volumetricRadDns.w;
 
-    // -- Shadow catcher (contract C7): if this iteration hit a shadow catcher,
-    // dim the GS segment reaching the ground by the occlusion visibility.
-    if (payload.hitShadowCatcher)
-      radiance *= payload.shadowVisibility;
+    // -- Shadow catcher (R5-strict): a catcher's shadow dims the GS segment
+    // AFTER it (the real ground GS, integrated next iteration), not the
+    // camera->catcher segment. Multiply this segment by the visibility carried
+    // from the previous catcher hit, then carry this iteration's catcher
+    // visibility forward (1.0 = no pending shadow).
+    radiance *= payload.pendingShadowVis;
+    payload.pendingShadowVis =
+        payload.hitShadowCatcher ? payload.shadowVisibility : 1.0f;
 
     // -- Now accumulate the radiance collected along this path:
     // TODO (operel): The following will not suffice for pbr primitives with
