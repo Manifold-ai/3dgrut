@@ -41,9 +41,23 @@ def vec3(s: str) -> tuple:
 
 
 def parse_args() -> argparse.Namespace:
+    import json
+    # Pre-parse --preset so a JSON preset can supply defaults (explicit CLI flags
+    # still win). --config is already taken (3dgrt model yaml), so we use --preset.
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("--preset", default="")
+    _preset_path = _pre.parse_known_args()[0].preset
+    _presets = {}
+    if _preset_path:
+        with open(_preset_path) as _f:
+            _presets = json.load(_f)
+
     p = argparse.ArgumentParser(description="Shadow-catcher P1-P3 functional test")
-    p.add_argument("--gs_object", required=True, help="3DGS checkpoint (.pt/.ingp/.ply)")
-    p.add_argument("--catcher", required=True, help="External ground catcher mesh (.obj/.glb/.gltf)")
+    p.add_argument("--preset", default="", help="Load a JSON preset as defaults (explicit CLI flags still override)")
+    p.add_argument("--save_preset", default="", help="Write the resolved config to this JSON path, then continue rendering")
+    # required only when the preset does not already supply them
+    p.add_argument("--gs_object", required=("gs_object" not in _presets), help="3DGS checkpoint (.pt/.ingp/.ply)")
+    p.add_argument("--catcher", required=("catcher" not in _presets), help="External ground catcher mesh (.obj/.glb/.gltf)")
     p.add_argument("--mesh_assets", default="threedgrut_playground/assets", help="Folder with occluder assets")
     p.add_argument("--occluder", default="Teapot", help="Occluder asset name (stem capitalized), e.g. 'Teapot'")
     p.add_argument("--occluder_type", default="PBR", choices=["PBR", "DIFFUSE"], help="Occluder primitive type")
@@ -70,9 +84,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--light_dir", default="0,-1,0", type=vec3)
     p.add_argument("--intensity", type=float, default=3.0)
     p.add_argument("--soft_angle", type=float, default=0.05)
+    p.add_argument("--shadow_min", type=float, default=0.0, help="Shadow floor in [0,1]: 0=shadows reach black, 0.2=darkest keeps 20%")
+    p.add_argument("--shadow_spp", type=int, default=128, help="Soft-shadow occlusion samples per light (used when --soft_angle>0)")
     p.add_argument("--tol", type=float, default=2e-2, help="Tolerance for the A==B / A==C regression checks")
     p.add_argument("--skip_assert", action="store_true", help="Only render + save, skip numeric asserts")
-    return p.parse_args()
+    p.add_argument("--light_dirs", default="",
+                   help="Semicolon-separated extra directional lights for multi-light, "
+                        "e.g. '0.6,1,0.4;-0.6,1,0.4;0.6,1,-0.4'. Empty = use the single --light_dir")
+    if _presets:
+        p.set_defaults(**_presets)  # preset values become defaults; CLI flags still override
+    args = p.parse_args()
+    if args.save_preset:
+        _cfg = {k: v for k, v in vars(args).items() if k not in ("preset", "save_preset")}
+        with open(args.save_preset, "w") as _f:
+            json.dump(_cfg, _f, indent=2)
+        print(f"[preset] saved resolved config -> {args.save_preset}")
+    return args
 
 
 def main() -> int:
@@ -91,6 +118,8 @@ def main() -> int:
         engine.spp.spp = args.spp
         engine.antialiasing_mode = "Quasi-Random (Sobol)"
     engine.use_optix_denoiser = args.denoise
+    engine.shadow_min = args.shadow_min
+    engine.shadow_spp = args.shadow_spp
     engine.camera_type = "Pinhole"
     engine.camera_fov = 60.0
     if (args.spp > 0 or args.denoise) and not args.skip_assert:
@@ -177,8 +206,19 @@ def main() -> int:
         transform_catcher(name)  # same rotate + 0.98 scale as the GS, about scene_center
         return name
 
+    # Default multi-light rig (used by G_multi_light when --light_dirs is empty):
+    # three directional lights from distinct directions -> overlapping shadows.
+    MULTI_LIGHT_DIRS = [(0.6, 1.0, 0.4), (-0.6, 1.0, 0.4), (0.6, 1.0, -0.4)]
+
+    def _light_dir_list():
+        # --light_dirs 'd1;d2;...' (semicolon-separated) overrides the single --light_dir.
+        if args.light_dirs:
+            return [tuple(float(x) for x in d.split(",")) for d in args.light_dirs.split(";") if d.strip()]
+        return [tuple(args.light_dir)]
+
     def add_light(angular_radius=0.0):
-        engine.add_light(Light(direction=args.light_dir, color=(1.0, 1.0, 1.0), intensity=args.intensity, angular_radius=angular_radius))
+        for d in _light_dir_list():
+            engine.add_light(Light(direction=d, color=(1.0, 1.0, 1.0), intensity=args.intensity, angular_radius=angular_radius))
 
     # ---- explicit scene builders (no lambda-tuple tricks) -------------------
     def build_gs_only():
@@ -210,6 +250,17 @@ def main() -> int:
         load_catcher()
         add_light()
         engine.disable_gaussian_tracing = True
+
+    def build_G_multi_light():
+        # Multiple directional lights -> overlapping contact shadows on the GS
+        # ground. The clearest visual proof directional lights take effect:
+        # each light casts its own soft shadow in its own direction.
+        add_occluder()
+        load_catcher()
+        dirs = _light_dir_list() if args.light_dirs else MULTI_LIGHT_DIRS
+        for d in dirs:
+            engine.add_light(Light(direction=d, color=(1.0, 1.0, 1.0),
+                                   intensity=args.intensity, angular_radius=args.soft_angle))
 
     # ---- camera (look-at the catcher center) / render / save ---------------
     _extent = float((gs_hi - gs_lo).max())
@@ -276,6 +327,7 @@ def main() -> int:
     run("D_hard_shadow", build_D_hard_shadow)
     run("E_soft_shadow", build_E_soft_shadow)
     run("F_disable_gs", build_F_disable_gs)
+    run("G_multi_light", build_G_multi_light)
 
     # Shadow diagnostic: B (catcher, no light) - D (catcher + light) = darkening.
     # Normalized so even a faint shadow is visible; the printed max is the true strength.

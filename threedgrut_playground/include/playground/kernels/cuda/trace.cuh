@@ -247,7 +247,8 @@ static __device__ __forceinline__ float4 traceGaussians(
 // -- Shadow / occlusion rays (Phase III, contract C6) --
 constexpr float SHADOW_RAY_EPS = 1e-4f; // lift ray origin off the surface
 constexpr float SHADOW_MAX_T = 1e16f;   // directional light: effectively infinite
-constexpr int SOFT_SHADOW_SPP = 128;    // soft-shadow samples/light (Phase 4: expose)
+// Soft-shadow sample count is a runtime param now: params.shadowSpp (engine
+// default 128); see traceShadow below.
 
 // Single occlusion ray on the mesh BVH. Returns true if a solid (non shadow
 // catcher) primitive occludes. The shadow catcher itself is ignored in the
@@ -273,15 +274,17 @@ traceOcclusion(const float3 ori, const float3 dir, HybridRayPayload *payload) {
   return payload->occluded != 0;
 }
 
-// Sample a direction within a cone of half-angle `angularRadius` around `dir`
-// (uniform over solid angle). Used for soft shadows.
+// Sample a direction within a cone of half-angle `angularRadius` around `dir`,
+// cosine-weighted (pdf proportional to cos(theta)). This equals uniform
+// sampling of a disk light of that angular radius; since it importance-samples
+// the light, the soft-shadow estimator stays a plain average of visibility.
 static __device__ __forceinline__ float3
 sampleConeDirection(const float3 dir, float angularRadius, unsigned int &seed) {
   const float u1 = rnd(seed);
   const float u2 = rnd(seed);
-  const float cosThetaMax = cosf(angularRadius);
-  const float cosTheta = 1.0f - u1 * (1.0f - cosThetaMax);
-  const float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
+  const float sinThetaMax = sinf(angularRadius);
+  const float sinTheta = sinThetaMax * sqrtf(u1); // cosine-weighted (uniform disk light)
+  const float cosTheta = sqrtf(fmaxf(0.0f, 1.0f - sinTheta * sinTheta));
   const float phi = 2.0f * M_PIf * u2;
   const float3 w = dir; // cone axis (+z of the local frame)
   const float3 a = (fabsf(w.x) > 0.1f) ? make_float3(0.0f, 1.0f, 0.0f)
@@ -293,7 +296,7 @@ sampleConeDirection(const float3 dir, float angularRadius, unsigned int &seed) {
 }
 
 // Visibility of `surfPos` toward `light`, in [0,1]. Hard shadow = 1 ray;
-// soft shadow (angularRadius > 0) averages SOFT_SHADOW_SPP rays in the cone.
+// soft shadow (angularRadius > 0) averages params.shadowSpp cone rays.
 static __device__ __forceinline__ float
 traceShadow(const float3 surfPos, const PlaygroundLight &light,
             HybridRayPayload *payload) {
@@ -305,15 +308,16 @@ traceShadow(const float3 surfPos, const PlaygroundLight &light,
   if (light.angularRadius <= 0.0f)
     return traceOcclusion(ori, L, payload) ? 0.0f : 1.0f;
 
+  const int spp = params.shadowSpp > 0u ? (int)params.shadowSpp : 1;
   unsigned int seed = payload->rndSeed;
   int unblocked = 0;
-  for (int s = 0; s < SOFT_SHADOW_SPP; ++s) {
+  for (int s = 0; s < spp; ++s) {
     const float3 sdir = sampleConeDirection(L, light.angularRadius, seed);
     if (!traceOcclusion(ori, sdir, payload))
       ++unblocked;
   }
   payload->rndSeed = seed;
-  return (float)unblocked / (float)SOFT_SHADOW_SPP;
+  return (float)unblocked / (float)spp;
 }
 
 static __device__ __forceinline__ float3

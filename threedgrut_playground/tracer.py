@@ -188,6 +188,8 @@ class Tracer:
         envmap_offset=None,
         max_pbr_bounces=7,
         lights=None,
+        shadow_min=0.0,
+        shadow_spp=128,
     ):
         if ray_max_t is None:
             ray_max_t = ray_o.new_full(size=ray_o.shape[0:3], fill_value=1e9)
@@ -252,6 +254,8 @@ class Tracer:
                 envmap_offset,
                 max_pbr_bounces,
                 lights,
+                shadow_min,
+                shadow_spp,
             )
 
             pred_dist = pred_dist[:, :, :, 0:1]  # return only the hit distance

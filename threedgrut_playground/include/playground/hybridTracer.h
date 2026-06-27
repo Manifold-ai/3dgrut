@@ -145,7 +145,8 @@ public:
               const std::vector<CPBRMaterial> &materials,
               bool shouldSyncMaterials, torch::Tensor refractiveIndex,
               torch::Tensor envmap, torch::Tensor envmapOffset,
-              const unsigned int maxPBRBounces, torch::Tensor lights);
+              const unsigned int maxPBRBounces, torch::Tensor lights,
+              float shadowMin, unsigned int shadowSpp);
 
   torch::Tensor denoise(torch::Tensor rayRad);
 };
