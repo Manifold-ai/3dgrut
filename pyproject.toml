@@ -79,25 +79,24 @@ playground = [
 ]
 # Minimal, version-locked headless deps for downstream reuse of threedgrut_playground
 # (Engine3DGRUT shadow-catcher path; excludes GUI polyscope/viser and training-only
-# packages). The "==" pins below are GENERATED on the target CUDA env by
-# scripts/gen_playground_lock.py (it also writes threedgrut_playground/_deps_lock.py,
-# the source of truth enforced by the import-time version check). Until generated they
-# are left unpinned; paste the generator's output here to lock them.
+# packages). This list is the SINGLE source of truth for the locked set: the import-time
+# version check in threedgrut_playground/__init__.py reads these "==" pins back from the
+# installed distribution metadata. Pins captured on a CUDA env (torch built for cu128).
 playground-lock = [
-    "torch",
-    "numpy",
-    "kaolin",
-    "hydra-core",
-    "imageio",
-    "scipy",
-    "opencv-python",
-    "pillow",
-    "tqdm",
-    "pygltflib",
-    "msgpack",
-    "omegaconf",
-    "plyfile",
-    "ninja",
+    "torch==2.8.0+cu128",
+    "numpy==1.26.4",
+    "kaolin==0.18.0",
+    "hydra-core==1.3.3",
+    "imageio==2.37.3",
+    "scipy==1.17.1",
+    "opencv-python==4.11.0.86",
+    "pillow==12.2.0",
+    "tqdm==4.68.3",
+    "pygltflib==1.16.5",
+    "msgpack==1.2.1",
+    "omegaconf==2.3.1",
+    "plyfile==1.1.3",
+    "ninja==1.13.0",
     "usd-core>=26.5; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 

@@ -23,25 +23,50 @@ The four exported names are imported **lazily** (on first attribute access) so t
 ``import threedgrut_playground`` itself stays light — it does not pull in kaolin, torch
 CUDA, or the OptiX/CUDA tracers, which only load when you actually touch ``Engine3DGRUT``
 et al. At import time we run a lightweight check (``importlib.metadata`` only) that the
-installed dependency versions match the locked set in :mod:`threedgrut_playground._deps_lock`.
+installed dependency versions match the ``playground-lock`` extra pinned in pyproject.toml
+(read back from this distribution's metadata — the single source of truth for the lock).
 """
 
 __all__ = ["Engine3DGRUT", "Light", "LightType", "OptixPrimitiveTypes"]
 
+_LOCK_EXTRA = "playground-lock"
+
+
+def _locked_pins() -> dict:
+    """Read the ``playground-lock`` extra's ``==`` pins from this distribution's
+    metadata (sourced from pyproject.toml). Returns {} when the package is not installed
+    as a distribution (e.g. running from a bare source tree)."""
+    import importlib.metadata as md
+
+    dist = (md.packages_distributions().get(__name__) or ["threedgrut"])[0]
+    try:
+        reqs = md.requires(dist) or []
+    except md.PackageNotFoundError:
+        return {}
+    pins = {}
+    for req in reqs:
+        if f'extra == "{_LOCK_EXTRA}"' not in req and f"extra == '{_LOCK_EXTRA}'" not in req:
+            continue
+        spec = req.split(";", 1)[0].strip()
+        if "==" not in spec:  # skip non-exact pins (e.g. platform-gated usd-core>=…)
+            continue
+        name, _, ver = spec.partition("==")
+        pins[name.strip()] = ver.strip()
+    return pins
+
 
 def _check_locked_deps() -> None:
     """Warn (or, under THREEDGRUT_PLAYGROUND_STRICT_DEPS=1, raise) when installed
-    versions diverge from the locked set. No-op while the lock is empty/ungenerated."""
+    versions diverge from the locked set. No-op when no pins are available."""
     import importlib.metadata as md
     import os
     import warnings
 
-    from ._deps_lock import LOCKED
-
-    if not LOCKED:
+    locked = _locked_pins()
+    if not locked:
         return
     mismatches = []
-    for pkg, want in LOCKED.items():
+    for pkg, want in locked.items():
         try:
             got = md.version(pkg)
         except md.PackageNotFoundError:
