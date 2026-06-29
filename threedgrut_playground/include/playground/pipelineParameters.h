@@ -46,20 +46,22 @@ struct alignas(16) PBRMaterial {
                // --> mem 16 byte aligned
 };
 
-// -- Light sources (Phase II: directional) --
+// -- Light sources (directional + point) --
 // Explicit byte layout locks host(std::vector)/device ABI parity and keeps the
 // offset map readable. Note: CUDA float3 is 4-byte aligned (only float4 is 16B),
-// so there is no implicit padding here; pad0 just places direction at offset 16.
+// so there is no implicit padding here; `position` (point light) reuses what was
+// previously pad0, keeping `direction` at offset 16 and sizeof == 48.
 enum PlaygroundLightType {
   PGRNDLightNone = 0,
-  PGRNDLightDirectional = 1
-  // future: PGRNDLightPoint = 2, PGRNDLightSpot = 3, PGRNDLightEnvmapIS = 4
+  PGRNDLightDirectional = 1,
+  PGRNDLightPoint = 2
+  // future: PGRNDLightSpot = 3, PGRNDLightEnvmapIS = 4
 };
 
 struct alignas(16) PlaygroundLight {
   unsigned int type;          // 4 bytes  -> offset 4  ; PlaygroundLightType
-  float        pad0[3];       // 12 bytes -> offset 16 ; pad so direction starts at offset 16
-  float3       direction;     // 12 bytes -> offset 28 ; unit vec, shading point -> light (world)
+  float3       position;      // 12 bytes -> offset 16 ; world-space point (point light); unused for directional
+  float3       direction;     // 12 bytes -> offset 28 ; unit vec, shading point -> light (world; directional)
   float        intensity;     // 4 bytes  -> offset 32 ; scalar multiplier
   float3       color;         // 12 bytes -> offset 44 ; linear RGB
   float        angularRadius; // 4 bytes  -> offset 48 ; radians; 0=hard, >0=soft (Phase 4)

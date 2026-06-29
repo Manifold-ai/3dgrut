@@ -254,7 +254,8 @@ constexpr float SHADOW_MAX_T = 1e16f;   // directional light: effectively infini
 // catcher) primitive occludes. The shadow catcher itself is ignored in the
 // shadow branch of __anyhit__ah (contract C5). anyhit MUST stay enabled.
 static __device__ __forceinline__ bool
-traceOcclusion(const float3 ori, const float3 dir, HybridRayPayload *payload) {
+traceOcclusion(const float3 ori, const float3 dir, const float maxT,
+               HybridRayPayload *payload) {
   setNextTraceState(PGRNDTraceShadowRayPass); // route __anyhit__ah to occlusion
   payload->occluded = 0;                      // internal scratch
 
@@ -262,7 +263,7 @@ traceOcclusion(const float3 ori, const float3 dir, HybridRayPayload *payload) {
   packPointer(payload, p0, p1);
   optixTrace(params.triHandle, ori, dir,
              SHADOW_RAY_EPS,                        // tmin
-             SHADOW_MAX_T,                          // tmax (directional: far)
+             maxT,                                  // tmax (directional: far; point: light distance)
              0.0f,                                  // rayTime
              OptixVisibilityMask(255),
              // anyhit stays ENABLED (occlusion test); closesthit DISABLED so a
@@ -302,18 +303,30 @@ traceShadow(const float3 surfPos, const PlaygroundLight &light,
             HybridRayPayload *payload) {
   // payload is passed in (not getRayPayload()): traceShadow is now called from
   // __raygen__rg, where there is no ray payload to unpack (Option B, depth 1).
-  const float3 L = light.direction; // contract C2/R6: from shading point to light
+
+  // Direction to the light and how far the occlusion ray should reach.
+  float3 L;   // unit vector, shading point -> light (contract C2/R6)
+  float maxT; // directional -> effectively infinite; point -> the light distance
+  if (light.type == PGRNDLightPoint) {
+    const float3 toLight = light.position - surfPos;
+    const float dist = length(toLight);
+    L = toLight / fmaxf(dist, 1e-8f);
+    maxT = dist - 2.0f * SHADOW_RAY_EPS; // clamp to the light: geometry behind it does not occlude
+  } else {                               // PGRNDLightDirectional
+    L = light.direction;
+    maxT = SHADOW_MAX_T;
+  }
   const float3 ori = surfPos + SHADOW_RAY_EPS * L;
 
   if (light.angularRadius <= 0.0f)
-    return traceOcclusion(ori, L, payload) ? 0.0f : 1.0f;
+    return traceOcclusion(ori, L, maxT, payload) ? 0.0f : 1.0f;
 
   const int spp = params.shadowSpp > 0u ? (int)params.shadowSpp : 1;
   unsigned int seed = payload->rndSeed;
   int unblocked = 0;
   for (int s = 0; s < spp; ++s) {
     const float3 sdir = sampleConeDirection(L, light.angularRadius, seed);
-    if (!traceOcclusion(ori, sdir, payload))
+    if (!traceOcclusion(ori, sdir, maxT, payload))
       ++unblocked;
   }
   payload->rndSeed = seed;

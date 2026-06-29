@@ -118,15 +118,16 @@ class PBRMaterial:
 
 
 class LightType(IntEnum):
-    """Light source type, mirrors C++ PlaygroundLightType. Phase II: DIRECTIONAL only."""
+    """Light source type, mirrors C++ PlaygroundLightType."""
 
     NONE = 0
     DIRECTIONAL = 1
-    # future: POINT = 2, SPOT = 3, ENVMAP_IS = 4
+    POINT = 2
+    # future: SPOT = 3, ENVMAP_IS = 4
 
     @classmethod
     def names(cls):
-        return ["None", "Directional"]
+        return ["None", "Directional", "Point"]
 
 
 @dataclass
@@ -137,14 +138,16 @@ class Light:
     """
 
     light_type: int = int(LightType.DIRECTIONAL)
-    direction: Tuple[float, float, float] = (0.0, -1.0, 0.0)  # to light, world space
+    direction: Tuple[float, float, float] = (0.0, -1.0, 0.0)  # to light, world space (directional)
     color: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # linear RGB
     intensity: float = 1.0
     angular_radius: float = 0.0  # radians; 0 = hard shadow, > 0 = soft (Phase 4)
+    position: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # world space (point light); unused for directional
 
     def to_row(self) -> List[float]:
-        """Serialize to the 9 columns of contract C8: [type, dir.xyz, color.rgb,
-        intensity, angularRadius]. Direction is normalized defensively (C2).
+        """Serialize to the 12 columns of contract C8: [type, dir.xyz, color.rgb,
+        intensity, angularRadius, pos.xyz]. Direction is normalized defensively (C2).
+        For POINT lights the kernel uses `position` and ignores `direction`.
         """
         dx, dy, dz = self.direction
         norm = (dx * dx + dy * dy + dz * dz) ** 0.5
@@ -160,6 +163,9 @@ class Light:
             float(self.color[2]),
             float(self.intensity),
             float(self.angular_radius),
+            float(self.position[0]),
+            float(self.position[1]),
+            float(self.position[2]),
         ]
 
 
@@ -1048,11 +1054,11 @@ class Engine3DGRUT:
         self._lights_dirty = True
 
     def _build_lights_tensor(self) -> torch.Tensor:
-        """Pack ``self.lights`` into the contract-C8 ``[N, 9]`` float32 CUDA tensor.
-        Empty -> ``[0, 9]`` (kernel sees numLights == 0, lighting/shadows disabled).
+        """Pack ``self.lights`` into the contract-C8 ``[N, 12]`` float32 CUDA tensor.
+        Empty -> ``[0, 12]`` (kernel sees numLights == 0, lighting/shadows disabled).
         """
         if len(self.lights) == 0:
-            return torch.empty([0, 9], dtype=torch.float32, device=self.device)
+            return torch.empty([0, 12], dtype=torch.float32, device=self.device)
         rows = [light.to_row() for light in self.lights]
         return torch.tensor(rows, dtype=torch.float32, device=self.device).contiguous()
 
