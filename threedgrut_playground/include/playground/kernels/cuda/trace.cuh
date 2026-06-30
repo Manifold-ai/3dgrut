@@ -304,6 +304,28 @@ traceShadow(const float3 surfPos, const PlaygroundLight &light,
   // payload is passed in (not getRayPayload()): traceShadow is now called from
   // __raygen__rg, where there is no ray payload to unpack (Option B, depth 1).
 
+  // Area (rectangle) light: inherently soft. Sample params.shadowSpp points on
+  // the rect (center = position, half-edges tangentU/tangentV), each a point
+  // occlusion test clamped to the sample distance. Average -> visibility.
+  if (light.type == PGRNDLightArea) {
+    const int spp = params.shadowSpp > 0u ? (int)params.shadowSpp : 1;
+    unsigned int seed = payload->rndSeed;
+    int unblocked = 0;
+    for (int s = 0; s < spp; ++s) {
+      const float u1 = 2.0f * rnd(seed) - 1.0f; // [-1,1] across half-edge U
+      const float u2 = 2.0f * rnd(seed) - 1.0f; // [-1,1] across half-edge V
+      const float3 Q = light.position + u1 * light.tangentU + u2 * light.tangentV;
+      float3 toLight = Q - surfPos;
+      const float dist = length(toLight);
+      const float3 Ld = toLight / fmaxf(dist, 1e-8f);
+      const float3 o = surfPos + SHADOW_RAY_EPS * Ld;
+      if (!traceOcclusion(o, Ld, dist - 2.0f * SHADOW_RAY_EPS, payload))
+        ++unblocked;
+    }
+    payload->rndSeed = seed;
+    return (float)unblocked / (float)spp;
+  }
+
   // Direction to the light and how far the occlusion ray should reach.
   float3 L;   // unit vector, shading point -> light (contract C2/R6)
   float maxT; // directional -> effectively infinite; point -> the light distance

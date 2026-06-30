@@ -54,20 +54,24 @@ struct alignas(16) PBRMaterial {
 enum PlaygroundLightType {
   PGRNDLightNone = 0,
   PGRNDLightDirectional = 1,
-  PGRNDLightPoint = 2
-  // future: PGRNDLightSpot = 3, PGRNDLightEnvmapIS = 4
+  PGRNDLightPoint = 2,
+  PGRNDLightArea = 3 // rectangle: center=position, half-edges tangentU/tangentV
+  // future: PGRNDLightSpot = 4, PGRNDLightEnvmapIS = 5
 };
 
 struct alignas(16) PlaygroundLight {
-  unsigned int type;          // 4 bytes  -> offset 4  ; PlaygroundLightType
-  float3       position;      // 12 bytes -> offset 16 ; world-space point (point light); unused for directional
-  float3       direction;     // 12 bytes -> offset 28 ; unit vec, shading point -> light (world; directional)
-  float        intensity;     // 4 bytes  -> offset 32 ; scalar multiplier
-  float3       color;         // 12 bytes -> offset 44 ; linear RGB
-  float        angularRadius; // 4 bytes  -> offset 48 ; radians; 0=hard, >0=soft (Phase 4)
-};                            // sizeof == 48, 16-byte aligned
-static_assert(sizeof(PlaygroundLight) == 48,
-              "PlaygroundLight must be 48 bytes for host/device ABI parity");
+  unsigned int type;          // 4 bytes  ; PlaygroundLightType
+  float3       position;      // 12 bytes ; world-space point (point/area center); unused for directional
+  float3       direction;     // 12 bytes ; unit vec, shading point -> light (world; directional)
+  float        intensity;     // 4 bytes  ; scalar multiplier
+  float3       color;         // 12 bytes ; linear RGB
+  float        angularRadius; // 4 bytes  ; radians; 0=hard, >0=soft (directional/point cone)
+  float3       tangentU;      // 12 bytes ; area light half-edge U (world); rect spans position +- U +- V
+  float3       tangentV;      // 12 bytes ; area light half-edge V (world); normal = normalize(cross(U,V))
+  float2       pad1;          // 8 bytes  ; pad to 16-byte multiple
+};                            // sizeof == 80, 16-byte aligned
+static_assert(sizeof(PlaygroundLight) == 80,
+              "PlaygroundLight must be 80 bytes for host/device ABI parity");
 
 struct PlaygroundPipelineParameters : PipelineParameters {
   PackedTensorAccessor32<float, 3> rayMaxT; ///< ray max t for termination

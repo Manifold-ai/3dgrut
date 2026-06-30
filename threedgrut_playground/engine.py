@@ -123,11 +123,12 @@ class LightType(IntEnum):
     NONE = 0
     DIRECTIONAL = 1
     POINT = 2
-    # future: SPOT = 3, ENVMAP_IS = 4
+    AREA = 3  # rectangle: center=position, half-edges tangent_u/tangent_v
+    # future: SPOT = 4, ENVMAP_IS = 5
 
     @classmethod
     def names(cls):
-        return ["None", "Directional", "Point"]
+        return ["None", "Directional", "Point", "Area"]
 
 
 @dataclass
@@ -141,13 +142,16 @@ class Light:
     direction: Tuple[float, float, float] = (0.0, -1.0, 0.0)  # to light, world space (directional)
     color: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # linear RGB
     intensity: float = 1.0
-    angular_radius: float = 0.0  # radians; 0 = hard shadow, > 0 = soft (Phase 4)
-    position: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # world space (point light); unused for directional
+    angular_radius: float = 0.0  # radians; 0 = hard shadow, > 0 = soft (directional/point)
+    position: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # world space (point/area center); unused for directional
+    tangent_u: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # AREA light half-edge U (world)
+    tangent_v: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # AREA light half-edge V (world)
 
     def to_row(self) -> List[float]:
-        """Serialize to the 12 columns of contract C8: [type, dir.xyz, color.rgb,
-        intensity, angularRadius, pos.xyz]. Direction is normalized defensively (C2).
-        For POINT lights the kernel uses `position` and ignores `direction`.
+        """Serialize to the 18 columns of contract C8: [type, dir.xyz, color.rgb,
+        intensity, angularRadius, pos.xyz, tangentU.xyz, tangentV.xyz]. Direction is
+        normalized defensively (C2). POINT uses `position` (ignores `direction`); AREA
+        uses `position` (rect center) + `tangent_u`/`tangent_v` (half-edges).
         """
         dx, dy, dz = self.direction
         norm = (dx * dx + dy * dy + dz * dz) ** 0.5
@@ -166,6 +170,12 @@ class Light:
             float(self.position[0]),
             float(self.position[1]),
             float(self.position[2]),
+            float(self.tangent_u[0]),
+            float(self.tangent_u[1]),
+            float(self.tangent_u[2]),
+            float(self.tangent_v[0]),
+            float(self.tangent_v[1]),
+            float(self.tangent_v[2]),
         ]
 
 
@@ -1054,11 +1064,11 @@ class Engine3DGRUT:
         self._lights_dirty = True
 
     def _build_lights_tensor(self) -> torch.Tensor:
-        """Pack ``self.lights`` into the contract-C8 ``[N, 12]`` float32 CUDA tensor.
-        Empty -> ``[0, 12]`` (kernel sees numLights == 0, lighting/shadows disabled).
+        """Pack ``self.lights`` into the contract-C8 ``[N, 18]`` float32 CUDA tensor.
+        Empty -> ``[0, 18]`` (kernel sees numLights == 0, lighting/shadows disabled).
         """
         if len(self.lights) == 0:
-            return torch.empty([0, 12], dtype=torch.float32, device=self.device)
+            return torch.empty([0, 18], dtype=torch.float32, device=self.device)
         rows = [light.to_row() for light in self.lights]
         return torch.tensor(rows, dtype=torch.float32, device=self.device).contiguous()
 

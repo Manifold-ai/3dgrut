@@ -95,6 +95,8 @@ def parse_args() -> argparse.Namespace:
                    help="POINT-light world position 'x,y,z'. Empty = auto: above the occluder along --light_dir")
     p.add_argument("--point_dist", type=float, default=0.5,
                    help="Auto point-light height = point_dist * scene_extent above the occluder (when --point_pos empty)")
+    p.add_argument("--area_size", type=float, default=0.1,
+                   help="AREA light rectangle half-edge length = area_size * scene_extent (bigger = softer)")
     if _presets:
         p.set_defaults(**_presets)  # preset values become defaults; CLI flags still override
     args = p.parse_args()
@@ -240,6 +242,21 @@ def main() -> int:
                                color=(1.0, 1.0, 1.0), intensity=args.intensity,
                                angular_radius=angular_radius))
 
+    def add_area_light(pos=None, half=None):
+        # Rectangle centered at `pos`, two half-edges perpendicular to --light_dir.
+        Ld = torch.tensor(tuple(args.light_dir), dtype=torch.float32)
+        Ld = Ld / Ld.norm().clamp_min(1e-8)
+        a = torch.tensor([0.0, 1.0, 0.0]) if abs(float(Ld[0])) > 0.1 else torch.tensor([1.0, 0.0, 0.0])
+        u = torch.cross(a, Ld, dim=0); u = u / u.norm().clamp_min(1e-8)
+        v = torch.cross(Ld, u, dim=0)
+        h = half if half is not None else (args.area_size * _extent)
+        p = pos if pos is not None else _point_light_pos()
+        engine.add_light(Light(light_type=int(LightType.AREA),
+                               position=tuple(p),
+                               color=(1.0, 1.0, 1.0), intensity=args.intensity,
+                               tangent_u=tuple((u * h).tolist()),
+                               tangent_v=tuple((v * h).tolist())))
+
     # ---- explicit scene builders (no lambda-tuple tricks) -------------------
     def build_gs_only():
         pass  # nothing added; pure GS -> aim the camera with this one
@@ -302,6 +319,16 @@ def main() -> int:
         print(f"[I    ] point light @ {tuple(round(float(x), 2) for x in pos)} + directional {tuple(args.light_dir)}")
         add_point_light(angular_radius=args.soft_angle, pos=pos)
         add_light(angular_radius=args.soft_angle)
+
+    def build_J_area_light():
+        # Single AREA (rectangle) light -> soft, rectangular contact shadow.
+        # Its softness comes from sampling the rect area (not angular_radius), so
+        # a bigger --area_size yields a softer, wider penumbra. G-B proof.
+        add_occluder()
+        load_catcher()
+        pos = _point_light_pos()
+        print(f"[J    ] area light @ {tuple(round(float(x), 2) for x in pos)} half={args.area_size * _extent:.3f}")
+        add_area_light(pos=pos)
 
     # ---- camera (look-at the catcher center) / render / save ---------------
     _extent = float((gs_hi - gs_lo).max())
@@ -371,6 +398,7 @@ def main() -> int:
     run("G_multi_light", build_G_multi_light)
     run("H_point_light", build_H_point_light)
     run("I_point_plus_dir", build_I_point_plus_dir)
+    run("J_area_light", build_J_area_light)
 
     # Shadow diagnostic: B (catcher, no light) - D (catcher + light) = darkening.
     # Normalized so even a faint shadow is visible; the printed max is the true strength.
@@ -404,6 +432,16 @@ def main() -> int:
     print(f"[P3 hard shadow ] max(B-D)={p3_max:.5f}, mean darken={p3_mean:+.5f} -> {'PASS' if p3_max > args.tol else 'FAIL'}")
     print(f"[F disable-GS   ] {'PASS (no crash)' if results.get('F_disable_gs') is not None else 'FAIL (crashed)'}")
     ok &= p1 <= args.tol and p2 <= args.tol and p3_max > args.tol and results.get("F_disable_gs") is not None
+
+    # ---- G-B area light check: the AREA light must cast a contact shadow ------
+    j = results.get("J_area_light")
+    if j is not None:
+        jb_max = (b - j).clamp(min=0.0).max().item()
+        print(f"[G-B area light] max(B-J)={jb_max:.5f} (tol {args.tol}) -> {'PASS' if jb_max > args.tol else 'FAIL'}")
+        ok &= jb_max > args.tol
+    else:
+        print("[G-B area light] J_area_light failed to render -> FAIL")
+        ok = False
 
     print("\ninspect:", args.out, "(esp. D_hard_shadow.png vs B_catcher_nolight.png)")
     print("OVERALL:", "PASS" if ok else "FAIL")
