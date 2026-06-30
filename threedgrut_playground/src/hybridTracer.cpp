@@ -333,7 +333,7 @@ void HybridOptixTracer::syncLights(const torch::Tensor &lights) {
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor>
+           torch::Tensor, torch::Tensor, torch::Tensor>
 HybridOptixTracer::traceHybrid(
     uint32_t frameNumber, torch::Tensor rayToWorld, torch::Tensor rayOri,
     torch::Tensor rayDir, torch::Tensor particleDensity,
@@ -360,6 +360,11 @@ HybridOptixTracer::traceHybrid(
   torch::Tensor rayNrm =
       torch::empty({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
   torch::Tensor rayHitsCount =
+      torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
+  // Layered AOV outputs (G-A): zero-initialized so untouched pixels read 0.
+  torch::Tensor rayShadow =
+      torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
+  torch::Tensor rayObjMask =
       torch::zeros({rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, opts);
   torch::Tensor traceState = torch::zeros(
       {rayOri.size(0), rayOri.size(1), rayOri.size(2), 1}, int_opts);
@@ -393,6 +398,8 @@ HybridOptixTracer::traceHybrid(
   paramsHost.rayHitDistance = packed_accessor32<float, 4>(rayHit);
   paramsHost.rayNormal = packed_accessor32<float, 4>(rayNrm);
   paramsHost.rayHitsCount = packed_accessor32<float, 4>(rayHitsCount);
+  paramsHost.shadowFactor = packed_accessor32<float, 4>(rayShadow);
+  paramsHost.objectMask = packed_accessor32<float, 4>(rayObjMask);
 
   // ----- Playground launch params -----
   paramsHost.rayMaxT = packed_accessor32<float, 3>(rayMaxT);
@@ -466,8 +473,8 @@ HybridOptixTracer::traceHybrid(
   CUDA_CHECK_LAST();
 
   return std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor>(rayRad, rayDns, rayHit, rayNrm,
-                                   rayHitsCount);
+                    torch::Tensor, torch::Tensor, torch::Tensor>(
+      rayRad, rayDns, rayHit, rayNrm, rayHitsCount, rayShadow, rayObjMask);
 }
 
 torch::Tensor HybridOptixTracer::denoise(torch::Tensor rayRad) {

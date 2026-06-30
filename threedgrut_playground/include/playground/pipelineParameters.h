@@ -84,6 +84,18 @@ struct PlaygroundPipelineParameters : PipelineParameters {
   float shadowMin;             // shadow-catcher floor: radiance *= shadowMin +
                                // (1-shadowMin)*visibility (0 = shadows reach black)
   unsigned int shadowSpp;      // soft-shadow occlusion samples per light
+
+  // -- Layered AOV outputs (G-A): extra per-pixel buffers written alongside
+  //    rayRadiance/rayDensity so a single render yields the backend's
+  //    foreground/shadow/mask layers without a B-D differential pass.
+  PackedTensorAccessor32<float, 4>
+      shadowFactor; // [.,.,.,1] in [0,1]: per-pixel shadow darkening collected
+                    // at the shadow-catcher hit ((1-shadowMin)*(1-visibility));
+                    // 0 where no catcher/light affects the pixel.
+  PackedTensorAccessor32<float, 4>
+      objectMask;   // [.,.,.,1] 0/1: 1 where the ray hit a solid (non-catcher)
+                    // mesh primitive (product occupancy), 0 for GS/background.
+
   PackedTensorAccessor32<int32_t, 4>
       trace_state; // Scratch buffer, stores current render pass per ray
   PackedTensorAccessor32<int32_t, 2>

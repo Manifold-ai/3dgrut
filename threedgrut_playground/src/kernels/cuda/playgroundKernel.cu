@@ -66,6 +66,9 @@ extern "C" __global__ void __raygen__rg() {
   payload.shadowVisibility = 1.0f;
   payload.hitShadowCatcher = 0;
   payload.pendingShadowVis = 1.0f; // R5-strict: carried across loop iterations
+  // Initialize layered AOV scratch (G-A)
+  payload.objectMask = 0.0f;
+  payload.shadowAOV = 0.0f;
 
   // Initialize 3drt output buffers, we'll soon aggregate in them
   RayData rayData;
@@ -115,6 +118,11 @@ extern "C" __global__ void __raygen__rg() {
         vis = acc / (float)params.numLights;
       }
       payload.shadowVisibility = vis;
+      // AOV (G-A): keep the strongest per-pixel shadow darkening seen on this
+      // ray. Mirrors the radiance multiply below (1 - (shadowMin +
+      // (1-shadowMin)*vis)) so the shadow layer matches the dimming applied.
+      payload.shadowAOV =
+          fmaxf(payload.shadowAOV, (1.0f - params.shadowMin) * (1.0f - vis));
     }
 
     // Then perform volumetric radiance integration from ray origin to closest
@@ -187,6 +195,7 @@ extern "C" __global__ void __raygen__rg() {
 
   writeRadianceDensityToOutputBuffer(rgba);
   writeUpdatedRaysToBuffer(lastRayOri, lastRayDir);
+  writeAOV(payload.shadowAOV, payload.objectMask); // G-A layered AOVs
 }
 
 static __device__ __inline__ bool refract(float3 &out_dir, const float3 ray_d,
@@ -367,6 +376,12 @@ extern "C" __global__ void __closesthit__ch() {
                             : getHardNormal();
   auto intersected_type =
       params.primType[triId][0]; // Primitive type that we hit
+
+  // AOV (G-A): any solid (non-catcher) mesh hit marks this pixel as product
+  // occupancy. Catcher is transparent, so it does not set the mask.
+  if (intersected_type != PGRNDPrimitiveShadowCatcher &&
+      intersected_type != PGRNDPrimitiveNone)
+    payload->objectMask = 1.0f;
 
   float3 new_ray_dir =
       make_float3(0.0, 0.0, 0.0); // Will hold new redirected ray direction

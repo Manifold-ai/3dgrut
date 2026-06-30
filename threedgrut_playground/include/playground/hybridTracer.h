@@ -132,8 +132,10 @@ public:
   // _playgroundState->lights. N == 0 leaves the cache empty.
   void syncLights(const torch::Tensor &lights);
 
+  // Returns (rayRadiance, rayDensity, rayHitDistance, rayNormal, rayHitsCount,
+  //          shadowFactor, objectMask). The last two are the G-A layered AOVs.
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-             torch::Tensor>
+             torch::Tensor, torch::Tensor, torch::Tensor>
   traceHybrid(uint32_t frameNumber, torch::Tensor rayToWorld,
               torch::Tensor rayOri, torch::Tensor rayDir,
               torch::Tensor particleDensity, torch::Tensor particleRadiance,

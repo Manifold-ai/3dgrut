@@ -229,7 +229,15 @@ class Tracer:
             min_transmittance = self.conf.render.min_transmittance
             envmap_offset = envmap_offset.contiguous()
 
-            pred_rgb, pred_opacity, pred_dist, pred_normals, hits_count = self.tracer_wrapper.trace_hybrid(
+            (
+                pred_rgb,
+                pred_opacity,
+                pred_dist,
+                pred_normals,
+                hits_count,
+                shadow_factor,
+                object_mask,
+            ) = self.tracer_wrapper.trace_hybrid(
                 frame_id,
                 poses,
                 ray_o,
@@ -266,6 +274,8 @@ class Tracer:
             "pred_dist": pred_dist,
             "pred_normals": torch.nn.functional.normalize(pred_normals, dim=3),
             "hits_count": hits_count,
+            "shadow_factor": shadow_factor,  # G-A AOV: per-pixel shadow darkening
+            "object_mask": object_mask,  # G-A AOV: product occupancy (0/1)
             "last_ray_o": ray_o,  # Rewritten by tracer
             "last_ray_d": ray_d,  # Rewritten by tracer
         }

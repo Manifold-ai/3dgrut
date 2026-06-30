@@ -1277,16 +1277,27 @@ class Engine3DGRUT:
             else:
                 rb = self._render_playground_hybrid(rays.rays_ori, rays.rays_dir)
 
+            # Layered AOVs (G-A): present only on the hybrid path. Carry them
+            # through the dict reassignment and collapse the sample (batch) dim
+            # the same way as opacity (plain mean) so the semantics are preserved.
+            _aovs = {k: rb[k] for k in ("shadow_factor", "object_mask") if k in rb}
             rb = dict(rgb=rb["pred_rgb"], opacity=rb["pred_opacity"])
             rb["rgb"] = self.environment.tonemap(rb["rgb"])
             rb["rgb"] = torch.pow(rb["rgb"], 1.0 / self.gamma_correction)
             rb["rgb"] = rb["rgb"].mean(dim=0).unsqueeze(0)
             rb["opacity"] = rb["opacity"].mean(dim=0).unsqueeze(0)
+            for _k, _v in _aovs.items():
+                rb[_k] = _v.mean(dim=0).unsqueeze(0)
             self.spp.reset_accumulation()
             self.depth_of_field.reset_accumulation()
         else:
             # Render accumulated effects, i.e. depth of field
             rb = dict(rgb=self.last_state["rgb_buffer"], opacity=self.last_state["opacity"])
+            # Carry the layered AOVs (G-A) forward across progressive passes;
+            # they are not re-accumulated by the DoF/spp blend.
+            for _k in ("shadow_factor", "object_mask"):
+                if self.last_state.get(_k) is not None:
+                    rb[_k] = self.last_state[_k]
             if self.use_depth_of_field:
                 self._render_depth_of_field_buffer(rb, camera, rays)
             elif self.use_spp:
@@ -1302,6 +1313,9 @@ class Engine3DGRUT:
             rb["rgb"][mask] = 0.0
             rb["rgb_buffer"][mask] = 0.0
             rb["opacity"][mask] = 0.0
+            for _k in ("shadow_factor", "object_mask"):
+                if _k in rb:
+                    rb[_k][mask] = 0.0
 
         self._cache_last_state(camera=camera, renderbuffers=rb, canvas_size=[camera.height, camera.width])
         return rb
@@ -1550,6 +1564,9 @@ class Engine3DGRUT:
         self.last_state["rgb"] = renderbuffers["rgb"]
         self.last_state["rgb_buffer"] = renderbuffers["rgb_buffer"]
         self.last_state["opacity"] = renderbuffers["opacity"]
+        # Layered AOVs (G-A): cache so progressive passes can carry them forward.
+        self.last_state["shadow_factor"] = renderbuffers.get("shadow_factor")
+        self.last_state["object_mask"] = renderbuffers.get("object_mask")
 
     def _raygen_pinhole(self, camera: Camera, jitter: Optional[torch.Tensor] = None) -> RayPack:
         """Generates ray origins and directions for pinhole camera model.

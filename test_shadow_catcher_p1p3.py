@@ -328,8 +328,7 @@ def main() -> int:
     def render():
         # Force-rebuild the mesh BVH so the just-added occluder/catcher are in it.
         engine.primitives.rebuild_bvh_if_needed(force=True, rebuild=True)
-        fb = engine.render(make_camera())
-        return fb["rgb"][0].float().clamp(0.0, 1.0).cpu()  # (H,W,3)
+        return engine.render(make_camera())  # full framebuffer dict (rgb + AOVs)
 
     def save(img, tag):
         path = os.path.join(args.out, f"{tag}.png")
@@ -351,13 +350,21 @@ def main() -> int:
         prims = list(engine.primitives.objects.keys())
         print(f"[{tag}] primitives={prims}  lights={len(engine.lights)}  disable_gs={engine.disable_gaussian_tracing}")
         try:
-            img = render()
+            fb = render()
         except Exception as e:  # noqa: BLE001
             print(f"[{tag}] !!! CRASHED: {e}")
             results[tag] = None
             return
+        img = fb["rgb"][0].float().clamp(0.0, 1.0).cpu()  # (H,W,3)
         results[tag] = img
         p = save(img, tag)
+        # Layered AOVs (G-A): dump shadow + object mask when the engine emits them
+        # (hybrid path only). Expanded to 3 channels just so save_image works.
+        for aov_key, suffix in (("shadow_factor", "shadow"), ("object_mask", "mask")):
+            if aov_key in fb and fb[aov_key] is not None:
+                a = fb[aov_key][0].float().clamp(0.0, 1.0).cpu()  # (H,W,1)
+                results[f"{tag}__{suffix}"] = a
+                save(a.expand(-1, -1, 3), f"{tag}_{suffix}")
         print(f"[{tag}] mean={img.mean():.5f}  saved {p}")
 
     print("=== rendering scenes (check the [tag] lines: primitives/lights must be non-empty as expected) ===")
@@ -404,6 +411,23 @@ def main() -> int:
     print(f"[P3 hard shadow ] max(B-D)={p3_max:.5f}, mean darken={p3_mean:+.5f} -> {'PASS' if p3_max > args.tol else 'FAIL'}")
     print(f"[F disable-GS   ] {'PASS (no crash)' if results.get('F_disable_gs') is not None else 'FAIL (crashed)'}")
     ok &= p1 <= args.tol and p2 <= args.tol and p3_max > args.tol and results.get("F_disable_gs") is not None
+
+    # ---- G-A layered AOV checks (skipped if the engine didn't emit AOVs) -----
+    d_mask = results.get("D_hard_shadow__mask")
+    d_shadow = results.get("D_hard_shadow__shadow")
+    if d_mask is not None and d_shadow is not None:
+        # object_mask must mark the occluder (teapot) -> some pixels == 1.
+        mask_hits = (d_mask[..., 0] > 0.5).float().mean().item()
+        # shadow AOV must light up where B-D darkens (correlate the two maps).
+        bd = (b - d).clamp(min=0.0).mean(dim=-1)  # (H,W) darkening from differential
+        sh = d_shadow[..., 0]                      # (H,W) direct shadow AOV
+        denom = (bd.std() * sh.std()).item()
+        corr = (((bd - bd.mean()) * (sh - sh.mean())).mean().item() / denom) if denom > 1e-12 else 0.0
+        print(f"[G-A mask      ] occluder coverage={mask_hits:.4f} -> {'PASS' if mask_hits > 0.0 else 'FAIL'}")
+        print(f"[G-A shadow AOV] max={sh.max().item():.5f}, corr(B-D)={corr:.3f} -> {'PASS' if (sh.max().item() > args.tol and corr > 0.3) else 'FAIL'}")
+        ok &= mask_hits > 0.0 and sh.max().item() > args.tol and corr > 0.3
+    else:
+        print("[G-A           ] no AOVs in framebuffer (engine without G-A?) — skipped")
 
     print("\ninspect:", args.out, "(esp. D_hard_shadow.png vs B_catcher_nolight.png)")
     print("OVERALL:", "PASS" if ok else "FAIL")

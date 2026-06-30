@@ -80,6 +80,12 @@ struct HybridRayPayload {
   float pendingShadowVis; // R5-strict: a catcher hit's visibility, applied to
                           // the NEXT GS segment (the ground behind the catcher),
                           // not the camera->catcher segment. 1.0 = none pending.
+
+  // -- Layered AOV scratch (G-A) --
+  float objectMask; // 0/1: this ray hit a solid (non-catcher) mesh primitive
+                    // (product occupancy); set in __closesthit__ch.
+  float shadowAOV;  // [0,1]: strongest shadow darkening captured at a catcher
+                    // hit on this ray ((1-shadowMin)*(1-visibility)).
 };
 
 constexpr float epsT = 1e-9; // Minimal offset to ray t to avoid zero t
@@ -194,6 +200,16 @@ writeUpdatedRaysToBuffer(const float3 rayOri, const float3 rayDir) {
   params.rayDirection[idx.z][ry][rx][0] = rayDir.x;
   params.rayDirection[idx.z][ry][rx][1] = rayDir.y;
   params.rayDirection[idx.z][ry][rx][2] = rayDir.z;
+}
+
+// Layered AOV outputs (G-A): one float each, written once per primary ray.
+static __device__ __forceinline__ void writeAOV(float shadowFactor,
+                                                float objectMask) {
+  const uint3 idx = optixGetLaunchIndex();
+  const int rx = fminf(idx.x, params.frameBounds.x);
+  const int ry = fminf(idx.y, params.frameBounds.y);
+  params.shadowFactor[idx.z][ry][rx][0] = shadowFactor;
+  params.objectMask[idx.z][ry][rx][0] = objectMask;
 }
 
 static __device__ __forceinline__ void
