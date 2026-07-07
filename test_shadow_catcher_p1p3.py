@@ -32,12 +32,115 @@ import argparse
 import math
 import os
 import sys
+import time
 
 import torch
 
 
 def vec3(s: str) -> tuple:
     return tuple(float(x) for x in s.split(","))
+
+
+ALL_SCENE_TAGS = (
+    "gs_only",
+    "A_baseline",
+    "B_catcher_nolight",
+    "C_light_nocatcher",
+    "D_hard_shadow",
+    "E_soft_shadow",
+    "F_disable_gs",
+    "G_multi_light",
+    "H_point_light",
+    "I_point_plus_dir",
+    "J_area_light",
+)
+
+SCENE_ALIASES = {
+    "gs_only": "gs_only",
+    "a": "A_baseline",
+    "a_baseline": "A_baseline",
+    "b": "B_catcher_nolight",
+    "b_catcher_nolight": "B_catcher_nolight",
+    "c": "C_light_nocatcher",
+    "c_light_nocatcher": "C_light_nocatcher",
+    "d": "D_hard_shadow",
+    "d_hard_shadow": "D_hard_shadow",
+    "e": "E_soft_shadow",
+    "e_soft_shadow": "E_soft_shadow",
+    "f": "F_disable_gs",
+    "f_disable_gs": "F_disable_gs",
+    "g": "G_multi_light",
+    "g_multi_light": "G_multi_light",
+    "h": "H_point_light",
+    "h_point_light": "H_point_light",
+    "i": "I_point_plus_dir",
+    "i_point_plus_dir": "I_point_plus_dir",
+    "j": "J_area_light",
+    "j_area_light": "J_area_light",
+}
+
+ASSERTION_SCENE_TAGS = (
+    "A_baseline",
+    "B_catcher_nolight",
+    "C_light_nocatcher",
+    "D_hard_shadow",
+    "F_disable_gs",
+    "J_area_light",
+)
+
+
+def _scene_tokens(value) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw_items = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError(f"Scene names must be strings, got {item!r}")
+            raw_items.extend(item.split(","))
+    else:
+        raise ValueError(f"--scenes must be 'all', a comma-separated string, or a JSON list; got {value!r}")
+    return [item.strip() for item in raw_items if item.strip()]
+
+
+def resolve_scene_selection(value="all") -> list[str]:
+    tokens = _scene_tokens(value)
+    if not tokens:
+        raise ValueError("No scenes selected")
+    if any(token.lower() == "all" for token in tokens):
+        return list(ALL_SCENE_TAGS)
+
+    selected = []
+    for token in tokens:
+        key = token.lower()
+        if key == "shadow_diff":
+            expanded = ("B_catcher_nolight", "D_hard_shadow")
+        elif key in SCENE_ALIASES:
+            expanded = (SCENE_ALIASES[key],)
+        else:
+            valid = ", ".join(["all", "shadow_diff", *SCENE_ALIASES.keys()])
+            raise ValueError(f"Unknown scene {token!r}. Valid scenes/aliases: {valid}")
+        for tag in expanded:
+            if tag not in selected:
+                selected.append(tag)
+    return selected
+
+
+def validate_assertion_scene_dependencies(selected_scenes: list[str], skip_assert: bool) -> None:
+    if skip_assert:
+        return
+    missing = [tag for tag in ASSERTION_SCENE_TAGS if tag not in selected_scenes]
+    if missing:
+        raise ValueError(
+            "Partial scene selection is missing scenes required by numeric asserts: "
+            f"{', '.join(missing)}. Add those scenes or pass --skip_assert."
+        )
+
+
+def _cuda_synchronize_for_timing() -> None:
+    cuda = getattr(torch, "cuda", None)
+    if cuda is not None and cuda.is_available():
+        cuda.synchronize()
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +172,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="apps/colmap_3dgrt.yaml", help="Default config for .ingp/.ply or non-3dgrt .pt")
     p.add_argument("--out", default="./shadow_test_out", help="Output dir for PNGs")
     p.add_argument("--res", type=int, default=512, help="Render resolution (square)")
+    p.add_argument("--scenes", default="all",
+                   help="Comma-separated scenes to render: all, gs_only, A-J/full names, or shadow_diff")
     # Camera: look-at the occluder from a modest distance
     p.add_argument("--eye_dir", default="0,0.4,-1", type=vec3, help="Direction from the occluder to the eye (world)")
     p.add_argument("--cam_dist", type=float, default=0.25, help="Eye distance = cam_dist * scene_extent")
@@ -100,6 +205,10 @@ def parse_args() -> argparse.Namespace:
     if _presets:
         p.set_defaults(**_presets)  # preset values become defaults; CLI flags still override
     args = p.parse_args()
+    try:
+        resolve_scene_selection(args.scenes)
+    except ValueError as e:
+        p.error(str(e))
     if args.save_preset:
         _cfg = {k: v for k, v in vars(args).items() if k not in ("preset", "save_preset")}
         with open(args.save_preset, "w") as _f:
@@ -110,6 +219,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    selected_scenes = resolve_scene_selection(args.scenes)
+    try:
+        validate_assertion_scene_dependencies(selected_scenes, skip_assert=args.skip_assert)
+    except ValueError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        return 2
     os.makedirs(args.out, exist_ok=True)
 
     import kaolin
@@ -369,36 +484,66 @@ def main() -> int:
             torch.save(img, path)
         return path
 
+    scene_builders = (
+        ("gs_only", build_gs_only),
+        ("A_baseline", build_A_baseline),
+        ("B_catcher_nolight", build_B_catcher_nolight),
+        ("C_light_nocatcher", build_C_light_nocatcher),
+        ("D_hard_shadow", build_D_hard_shadow),
+        ("E_soft_shadow", build_E_soft_shadow),
+        ("F_disable_gs", build_F_disable_gs),
+        ("G_multi_light", build_G_multi_light),
+        ("H_point_light", build_H_point_light),
+        ("I_point_plus_dir", build_I_point_plus_dir),
+        ("J_area_light", build_J_area_light),
+    )
+    builder_by_tag = dict(scene_builders)
     results = {}
+    timings = {}
+    statuses = {}
 
     def run(tag, builder):
-        reset_scene()
-        builder()
-        # >>> confirm what is ACTUALLY in the scene before rendering <<<
-        prims = list(engine.primitives.objects.keys())
-        print(f"[{tag}] primitives={prims}  lights={len(engine.lights)}  disable_gs={engine.disable_gaussian_tracing}")
+        _cuda_synchronize_for_timing()
+        started = time.perf_counter()
         try:
+            reset_scene()
+            builder()
+            # >>> confirm what is ACTUALLY in the scene before rendering <<<
+            prims = list(engine.primitives.objects.keys())
+            print(f"[{tag}] primitives={prims}  lights={len(engine.lights)}  disable_gs={engine.disable_gaussian_tracing}")
             img = render()
         except Exception as e:  # noqa: BLE001
-            print(f"[{tag}] !!! CRASHED: {e}")
+            _cuda_synchronize_for_timing()
+            elapsed = time.perf_counter() - started
+            timings[tag] = elapsed
+            statuses[tag] = "CRASHED"
+            print(f"[{tag}] !!! CRASHED: {e}  time={elapsed:.3f}s")
             results[tag] = None
             return
         results[tag] = img
         p = save(img, tag)
-        print(f"[{tag}] mean={img.mean():.5f}  saved {p}")
+        _cuda_synchronize_for_timing()
+        elapsed = time.perf_counter() - started
+        timings[tag] = elapsed
+        statuses[tag] = "OK"
+        print(f"[{tag}] mean={img.mean():.5f}  saved {p}  time={elapsed:.3f}s")
+
+    def print_timing_summary():
+        print("\n=== timing summary (end-to-end per selected scene) ===")
+        for tag in selected_scenes:
+            elapsed = timings.get(tag)
+            status = statuses.get(tag, "SKIPPED")
+            if elapsed is None:
+                print(f"[timing] {tag}: {status}")
+            else:
+                print(f"[timing] {tag}: {elapsed:.3f}s  status={status}")
+        total = sum(timings.get(tag, 0.0) for tag in selected_scenes)
+        print(f"[timing total] {total:.3f}s for {len(selected_scenes)} scene(s)")
 
     print("=== rendering scenes (check the [tag] lines: primitives/lights must be non-empty as expected) ===")
-    run("gs_only", build_gs_only)            # AIM CAMERA: open shadow_test_out/gs_only.png, it must show your scene
-    run("A_baseline", build_A_baseline)
-    run("B_catcher_nolight", build_B_catcher_nolight)
-    run("C_light_nocatcher", build_C_light_nocatcher)
-    run("D_hard_shadow", build_D_hard_shadow)
-    run("E_soft_shadow", build_E_soft_shadow)
-    run("F_disable_gs", build_F_disable_gs)
-    run("G_multi_light", build_G_multi_light)
-    run("H_point_light", build_H_point_light)
-    run("I_point_plus_dir", build_I_point_plus_dir)
-    run("J_area_light", build_J_area_light)
+    print(f"[scenes] selected={','.join(selected_scenes)}")
+    for tag in selected_scenes:
+        run(tag, builder_by_tag[tag])
 
     # Shadow diagnostic: B (catcher, no light) - D (catcher + light) = darkening.
     # Normalized so even a faint shadow is visible; the printed max is the true strength.
@@ -411,6 +556,7 @@ def main() -> int:
 
     if args.skip_assert:
         print("\n--skip_assert set: inspect the PNGs in", args.out)
+        print_timing_summary()
         return 0
 
     # ---- sanity checks ------------------------------------------------------
@@ -418,6 +564,7 @@ def main() -> int:
     a, b, c, d = (results.get(k) for k in ("A_baseline", "B_catcher_nolight", "C_light_nocatcher", "D_hard_shadow"))
     if any(x is None for x in (a, b, c, d)):
         print("some scene failed to render; cannot run asserts. Inspect the logs/PNGs.")
+        print_timing_summary()
         return 1
 
     def maxdiff(x, y):
@@ -445,6 +592,7 @@ def main() -> int:
 
     print("\ninspect:", args.out, "(esp. D_hard_shadow.png vs B_catcher_nolight.png)")
     print("OVERALL:", "PASS" if ok else "FAIL")
+    print_timing_summary()
     return 0 if ok else 1
 
 
