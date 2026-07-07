@@ -110,9 +110,20 @@ extern "C" __global__ void __raygen__rg() {
       float vis = 1.0f; // numLights == 0 -> catcher transparent (visibility 1)
       if (params.numLights > 0) {
         float acc = 0.0f;
-        for (unsigned int i = 0; i < params.numLights; ++i)
-          acc += traceShadow(payload.shadowSurfPos, params.lights[i], &payload);
-        vis = acc / (float)params.numLights;
+        float weightSum = 0.0f;
+        for (unsigned int i = 0; i < params.numLights; ++i) {
+          const PlaygroundLight light = params.lights[i];
+          const float luminance =
+              fmaxf(0.0f, 0.2126f * light.color.x +
+                              0.7152f * light.color.y +
+                              0.0722f * light.color.z);
+          const float weight = fmaxf(0.0f, light.intensity) * luminance;
+          if (weight <= 0.0f)
+            continue;
+          acc += weight * traceShadow(payload.shadowSurfPos, light, &payload);
+          weightSum += weight;
+        }
+        vis = weightSum > 1e-8f ? acc / weightSum : 1.0f;
       }
       payload.shadowVisibility = vis;
     }
